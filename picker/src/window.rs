@@ -9,9 +9,13 @@ use std::rc::Rc;
 use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
 
+const MAX_TEXT_BYTES: usize = 64_000;
+
 #[derive(Default)]
 struct State {
     paths: Vec<PathBuf>,
+    text_mode: bool,
+    text: String,
     devices: Vec<Device>,
     order: HashMap<String, usize>,
     rendered: Vec<Row>,
@@ -35,6 +39,14 @@ fn single_line(text: &str) -> String {
 }
 
 impl State {
+    fn has_payload(&self) -> bool {
+        if self.text_mode {
+            !self.text.trim().is_empty() && self.text.len() <= MAX_TEXT_BYTES
+        } else {
+            !self.paths.is_empty()
+        }
+    }
+
     fn rows(&mut self) -> Vec<Row> {
         for device in &self.devices {
             let next = self.order.len();
@@ -73,7 +85,7 @@ impl State {
                 Row {
                     fingerprint: device.fingerprint.clone(),
                     label: alias,
-                    enabled: !self.paths.is_empty() && device.online && !self.sending,
+                    enabled: self.has_payload() && device.online && !self.sending,
                 }
             })
             .collect()
@@ -84,9 +96,16 @@ struct SendWindow {
     window: gtk::ApplicationWindow,
     selection: gtk::Label,
     rows: gtk::Box,
+    devices_scroll: gtk::ScrolledWindow,
     hint: gtk::Label,
     refresh: gtk::Button,
     choices: gtk::Box,
+    text_panel: gtk::Box,
+    editor: gtk::TextView,
+    text_count: gtk::Label,
+    text_notice: gtk::Label,
+    paste: gtk::Button,
+    pasting: Cell<bool>,
     cancel: gio::Cancellable,
     choosing: Cell<bool>,
     state: RefCell<State>,
@@ -113,8 +132,10 @@ impl SendWindow {
         let choices = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         let files = gtk::Button::with_label("选择文件");
         let folders = gtk::Button::with_label("选择文件夹");
+        let text = gtk::Button::with_label("输入文本");
         choices.append(&files);
         choices.append(&folders);
+        choices.append(&text);
         content.append(&choices);
         let selection = gtk::Label::builder()
             .label("尚未选择文件")
@@ -123,6 +144,49 @@ impl SendWindow {
             .max_width_chars(42)
             .build();
         content.append(&selection);
+        let text_panel = gtk::Box::new(gtk::Orientation::Vertical, 8);
+        text_panel.set_visible(false);
+        text_panel.append(
+            &gtk::Label::builder()
+                .label("输入或粘贴要发送的文本")
+                .xalign(0.0)
+                .build(),
+        );
+        let editor = gtk::TextView::builder()
+            .wrap_mode(gtk::WrapMode::WordChar)
+            .top_margin(8)
+            .bottom_margin(8)
+            .left_margin(8)
+            .right_margin(8)
+            .accepts_tab(false)
+            .build();
+        let editor_scroll = gtk::ScrolledWindow::builder()
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .min_content_height(130)
+            .child(&editor)
+            .build();
+        editor_scroll.add_css_class("frame");
+        text_panel.append(&editor_scroll);
+        let text_actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        let paste = gtk::Button::with_label("从剪贴板粘贴");
+        let clear = gtk::Button::with_label("清空");
+        text_actions.append(&paste);
+        text_actions.append(&clear);
+        text_panel.append(&text_actions);
+        let text_count = gtk::Label::builder()
+            .label("0 字 · 0 / 64,000 字节")
+            .xalign(0.0)
+            .build();
+        text_count.add_css_class("dim-label");
+        text_panel.append(&text_count);
+        let text_notice = gtk::Label::builder()
+            .xalign(0.0)
+            .wrap(true)
+            .max_width_chars(42)
+            .visible(false)
+            .build();
+        text_panel.append(&text_notice);
+        content.append(&text_panel);
         content.append(&gtk::Label::builder().label("发送到").xalign(0.0).build());
         let rows = gtk::Box::new(gtk::Orientation::Vertical, 5);
         let scroll = gtk::ScrolledWindow::builder()
@@ -146,14 +210,47 @@ impl SendWindow {
             window,
             selection,
             rows,
+            devices_scroll: scroll,
             hint,
             refresh,
             choices,
+            text_panel,
+            editor,
+            text_count,
+            text_notice,
+            paste,
+            pasting: Cell::new(false),
             cancel: gio::Cancellable::new(),
             choosing: Cell::new(false),
             state: RefCell::new(State::default()),
             requests,
             next_poll: Cell::new(Instant::now()),
+        });
+        let weak = Rc::downgrade(&this);
+        text.connect_clicked(move |_| {
+            if let Some(this) = weak.upgrade() {
+                this.set_text_mode(true);
+                this.editor.grab_focus();
+            }
+        });
+        let weak = Rc::downgrade(&this);
+        this.editor.buffer().connect_changed(move |_| {
+            if let Some(this) = weak.upgrade() {
+                this.text_changed();
+            }
+        });
+        let weak = Rc::downgrade(&this);
+        clear.connect_clicked(move |_| {
+            if let Some(this) = weak.upgrade() {
+                this.editor.buffer().set_text("");
+                this.editor.grab_focus();
+            }
+        });
+        let weak = Rc::downgrade(&this);
+        this.paste.connect_clicked(move |_| {
+            if let Some(this) = weak.upgrade() {
+                this.paste_text();
+            }
         });
         for (button, folder) in [(files, false), (folders, true)] {
             let weak = Rc::downgrade(&this);
@@ -210,11 +307,96 @@ impl SendWindow {
         this
     }
 
+    fn set_text_mode(self: &Rc<Self>, enabled: bool) {
+        self.state.borrow_mut().text_mode = enabled;
+        self.selection.set_visible(!enabled);
+        self.text_panel.set_visible(enabled);
+        self.update_hint();
+        self.render();
+    }
+
+    fn text_changed(self: &Rc<Self>) {
+        let buffer = self.editor.buffer();
+        let text = buffer.text(&buffer.start_iter(), &buffer.end_iter(), true);
+        self.text_count.set_label(&format!(
+            "{} 字 · {} / 64,000 字节",
+            text.chars().count(),
+            text.len()
+        ));
+        let too_long = text.len() > MAX_TEXT_BYTES;
+        self.text_notice
+            .set_label("文本过长，请保存为文本文件后发送。");
+        self.text_notice.set_visible(too_long);
+        if too_long {
+            self.text_count.add_css_class("error");
+        } else {
+            self.text_count.remove_css_class("error");
+        }
+        self.state.borrow_mut().text = text.into();
+        self.render();
+    }
+
+    fn paste_text(self: &Rc<Self>) {
+        if self.state.borrow().closed || self.state.borrow().sending || self.pasting.replace(true) {
+            return;
+        }
+        self.paste.set_sensitive(false);
+        let clipboard = self.editor.clipboard();
+        let weak = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            let result = clipboard.read_text_future().await;
+            let Some(this) = weak.upgrade() else {
+                return;
+            };
+            this.pasting.set(false);
+            this.paste.set_sensitive(true);
+            let state = this.state.borrow();
+            if state.closed || state.sending || !state.text_mode {
+                return;
+            }
+            drop(state);
+            match result {
+                Ok(Some(text)) if !text.is_empty() => {
+                    let buffer = this.editor.buffer();
+                    buffer.begin_user_action();
+                    buffer.delete_selection(true, true);
+                    buffer.insert_at_cursor(&text);
+                    buffer.end_user_action();
+                    this.editor.grab_focus();
+                }
+                result => {
+                    this.text_notice.set_label(if result.is_err() {
+                        "暂时无法读取剪贴板，请使用 Ctrl+V 重试。"
+                    } else {
+                        "剪贴板中没有文本。"
+                    });
+                    this.text_notice.set_visible(true);
+                }
+            }
+        });
+    }
+
+    fn update_hint(&self) {
+        let state = self.state.borrow();
+        if state.sending {
+            return;
+        }
+        self.hint
+            .set_label(if !state.devices.iter().any(|d| d.online) {
+                "请保持对方 LocalSend 打开，并连接同一局域网。"
+            } else if state.text_mode {
+                "输入文本后，点击在线设备发送。"
+            } else {
+                "选择文件后，点击在线设备发送。"
+            });
+    }
+
     fn choose(self: &Rc<Self>, folder: bool) {
         if self.state.borrow().closed || self.state.borrow().sending || self.choosing.replace(true)
         {
             return;
         }
+        self.set_text_mode(false);
         self.choices.set_sensitive(false);
         let dialog = gtk::FileDialog::builder()
             .title(if folder {
@@ -281,6 +463,7 @@ impl SendWindow {
             &label
         });
         self.state.borrow_mut().paths = paths;
+        self.set_text_mode(false);
         self.render();
     }
 
@@ -327,14 +510,8 @@ impl SendWindow {
                 self.state.borrow_mut().loading = false;
                 match result {
                     Ok(devices) => {
-                        if !self.state.borrow().sending {
-                            self.hint.set_label(if devices.iter().any(|d| d.online) {
-                                "选择文件后，点击在线设备发送。"
-                            } else {
-                                "请保持对方 LocalSend 打开，并连接同一局域网。"
-                            });
-                        }
                         self.state.borrow_mut().devices = devices;
+                        self.update_hint();
                     }
                     Err(_) => self.backend_failed(),
                 }
@@ -348,6 +525,7 @@ impl SendWindow {
                         self.hint.set_label(&single_line(&error));
                         self.refresh.set_sensitive(true);
                         self.choices.set_sensitive(!self.choosing.get());
+                        self.text_panel.set_sensitive(true);
                         // Keep errors visible until an explicit refresh or selection.
                         self.next_poll.set(Instant::now() + Duration::from_secs(5));
                         self.render();
@@ -378,6 +556,9 @@ impl SendWindow {
             });
             self.rows.append(&button);
         }
+        // Keep a few device rows visible when expanding the text editor.
+        self.devices_scroll
+            .set_min_content_height(self.rows.measure(gtk::Orientation::Vertical, -1).1.min(120));
         state.rendered = rows;
     }
 
@@ -385,7 +566,7 @@ impl SendWindow {
         let mut state = self.state.borrow_mut();
         if state.closed
             || state.sending
-            || state.paths.is_empty()
+            || !state.has_payload()
             || !state
                 .devices
                 .iter()
@@ -394,10 +575,15 @@ impl SendWindow {
             return;
         }
         state.sending = true;
-        let paths = state.paths.clone();
+        let (paths, text) = if state.text_mode {
+            (Vec::new(), Some(state.text.clone()))
+        } else {
+            (state.paths.clone(), None)
+        };
         drop(state);
         self.refresh.set_sensitive(false);
         self.choices.set_sensitive(false);
+        self.text_panel.set_sensitive(false);
         self.hint.set_label("正在提交发送任务…");
         self.render();
         if self
@@ -405,6 +591,7 @@ impl SendWindow {
             .send(Job::Send {
                 target: target.into(),
                 paths,
+                text,
             })
             .is_err()
         {
@@ -440,7 +627,6 @@ pub fn run() -> anyhow::Result<()> {
         if let Some(replies) = replies.borrow_mut().take() {
             let window = SendWindow::new(app, requests.clone(), replies);
             window.window.present();
-            glib::idle_add_local_once(move || window.choose(false));
         } else if let Some(window) = app.active_window() {
             window.present();
         }
@@ -478,6 +664,26 @@ mod tests {
         assert!(state.rows().iter().all(|row| !row.enabled));
     }
 
+    #[test]
+    fn active_payload_rejects_blank_and_oversized_text_by_utf8_bytes() {
+        let mut state = State {
+            paths: vec!["/tmp/file".into()],
+            text_mode: true,
+            ..State::default()
+        };
+        for text in ["", " \n\t", "　\n"] {
+            state.text = text.into();
+            assert!(!state.has_payload());
+        }
+        state.text = "你".repeat(21_333) + "a";
+        assert_eq!(state.text.len(), MAX_TEXT_BYTES);
+        assert!(state.has_payload());
+        state.text.push('🙂');
+        assert!(!state.has_payload());
+        state.text_mode = false;
+        assert!(state.has_payload());
+    }
+
     // Run explicitly under Broadway: normal unit tests do not require a display.
     #[test]
     #[ignore = "requires an isolated GTK display"]
@@ -511,6 +717,67 @@ mod tests {
             },
         ];
         window.received(Reply::Devices(Ok(devices.clone())));
+        // Text and file drafts survive switching; only the active payload is sent.
+        window.set_text_mode(true);
+        assert!(window.text_panel.is_visible());
+        assert!(!window.selection.is_visible());
+        assert!(!window.rows.first_child().unwrap().is_sensitive());
+        let message = "  中文🙂\n第二行\n";
+        window.editor.buffer().set_text(message);
+        assert!(window.rows.first_child().unwrap().is_sensitive());
+        window.select_paths(vec!["/tmp/draft.txt".into()]);
+        assert!(!window.text_panel.is_visible());
+        window.set_text_mode(true);
+        assert_eq!(window.state.borrow().text, message);
+        window
+            .editor
+            .buffer()
+            .set_text(&"a".repeat(MAX_TEXT_BYTES + 1));
+        assert!(window.text_notice.is_visible());
+        assert!(!window.rows.first_child().unwrap().is_sensitive());
+        window.send("LIVE");
+        assert!(jobs.try_recv().is_err());
+        window.editor.buffer().set_text(message);
+        window.send("LIVE");
+        match jobs.recv().unwrap() {
+            Job::Send {
+                target,
+                paths,
+                text,
+            } => {
+                assert_eq!(target, "LIVE");
+                assert!(paths.is_empty());
+                assert_eq!(text.as_deref(), Some(message));
+            }
+            _ => panic!("expected text send"),
+        }
+        assert!(!window.text_panel.is_sensitive());
+        window.received(Reply::Sent(Err("queue full".into())));
+        assert!(window.text_panel.is_sensitive());
+        assert_eq!(window.state.borrow().text, message);
+        assert_eq!(
+            window.state.borrow().paths,
+            vec![PathBuf::from("/tmp/draft.txt")]
+        );
+        window.editor.buffer().set_text("");
+        window.editor.clipboard().set_text(message);
+        window.paste.emit_clicked();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while window.pasting.get() && Instant::now() < deadline {
+            glib::MainContext::default().iteration(false);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(!window.pasting.get());
+        assert_eq!(window.state.borrow().text, message);
+        window.editor.clipboard().set_text("");
+        window.paste.emit_clicked();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while window.pasting.get() && Instant::now() < deadline {
+            glib::MainContext::default().iteration(false);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(window.state.borrow().text, message);
+        assert_eq!(window.text_notice.label(), "剪贴板中没有文本。");
         // Exercise both real GTK asynchronous chooser paths and cancellation.
         // A dismissal must preserve the previous selection and unlock controls.
         for folder in [false, true] {
@@ -557,8 +824,13 @@ mod tests {
         assert!(jobs.try_recv().is_err());
         window.send("LIVE");
         match jobs.recv().unwrap() {
-            Job::Send { target, paths } => {
+            Job::Send {
+                target,
+                paths,
+                text,
+            } => {
                 assert_eq!(target, "LIVE");
+                assert_eq!(text, None);
                 assert_eq!(
                     paths,
                     vec![

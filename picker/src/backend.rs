@@ -10,6 +10,7 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 const MAX_RESPONSE: u64 = 1024 * 1024;
+const MAX_REQUEST: usize = 256 * 1024;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 pub struct Device {
@@ -48,7 +49,11 @@ pub enum Job {
     Open,
     Poll,
     Refresh,
-    Send { target: String, paths: Vec<PathBuf> },
+    Send {
+        target: String,
+        paths: Vec<PathBuf>,
+        text: Option<String>,
+    },
     Close,
 }
 
@@ -70,7 +75,12 @@ fn exchange(stream: UnixStream, request: &Request) -> Result<Value> {
     stream.set_read_timeout(Some(Duration::from_secs(6)))?;
     stream.set_write_timeout(Some(Duration::from_secs(6)))?;
     let mut writer = &stream;
-    serde_json::to_writer(&mut writer, request)?;
+    let encoded = serde_json::to_vec(request)?;
+    ensure!(
+        encoded.len() < MAX_REQUEST,
+        "发送内容过长，请保存为文件后发送。"
+    );
+    writer.write_all(&encoded)?;
     writer.write_all(b"\n")?;
     let mut bytes = Vec::new();
     BufReader::new(stream.take(MAX_RESPONSE + 1)).read_until(b'\n', &mut bytes)?;
@@ -128,10 +138,14 @@ pub fn start(socket: PathBuf) -> Worker {
                     session: session.clone(),
                 },
                 Job::Refresh => Request::Refresh { timeout_ms: 4000 },
-                Job::Send { target, paths } => Request::Send {
+                Job::Send {
                     target,
                     paths,
-                    text: None,
+                    text,
+                } => Request::Send {
+                    target,
+                    paths,
+                    text,
                 },
                 Job::Close => break,
             };
@@ -240,6 +254,44 @@ mod tests {
     }
 
     #[test]
+    fn text_request_preserves_multiline_unicode_and_rejects_oversized_json() {
+        let text = "中文🙂\n\"引号\"\\路径\n$(touch no)\n";
+        let (client, server) = UnixStream::pair().unwrap();
+        let peer = thread::spawn(move || {
+            let mut reader = BufReader::new(server);
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            let value: Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(value["text"], text);
+            assert_eq!(value["paths"], json!([]));
+            reader.get_mut().write_all(b"{\"ok\":true}\n").unwrap();
+        });
+        exchange(
+            client,
+            &Request::Send {
+                target: "LIVE".into(),
+                paths: Vec::new(),
+                text: Some(text.into()),
+            },
+        )
+        .unwrap();
+        peer.join().unwrap();
+
+        // 64 KB of control characters can exceed the 256 KB IPC frame after escaping.
+        let (client, _server) = UnixStream::pair().unwrap();
+        let error = exchange(
+            client,
+            &Request::Send {
+                target: "LIVE".into(),
+                paths: Vec::new(),
+                text: Some("\u{0001}".repeat(64_000)),
+            },
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("发送内容过长"));
+    }
+
+    #[test]
     fn worker_orders_session_cleanup_after_pending_query_and_send() {
         let directory =
             std::env::temp_dir().join(format!("localsend-picker-{}", uuid::Uuid::new_v4()));
@@ -248,7 +300,7 @@ mod tests {
         let listener = UnixListener::bind(&socket).unwrap();
         let peer = thread::spawn(move || {
             let mut seen = Vec::new();
-            for _ in 0..5 {
+            for _ in 0..6 {
                 let (stream, _) = listener.accept().unwrap();
                 let mut reader = BufReader::new(stream);
                 let mut line = String::new();
@@ -264,12 +316,22 @@ mod tests {
                 seen.iter()
                     .map(|v| v["command"].as_str().unwrap())
                     .collect::<Vec<_>>(),
-                ["menu_open", "menu_poll", "refresh", "send", "menu_close"]
+                [
+                    "menu_open",
+                    "menu_poll",
+                    "refresh",
+                    "send",
+                    "send",
+                    "menu_close"
+                ]
             );
             assert_eq!(seen[0]["session"], seen[1]["session"]);
-            assert_eq!(seen[0]["session"], seen[4]["session"]);
+            assert_eq!(seen[0]["session"], seen[5]["session"]);
             assert_eq!(seen[3]["target"], "LIVE");
             assert_eq!(seen[3]["paths"], json!(["/tmp/中文 folder"]));
+            assert!(seen[3]["text"].is_null());
+            assert_eq!(seen[4]["paths"], json!([]));
+            assert_eq!(seen[4]["text"], "消息\n第二行🙂\n");
         });
         let worker = start(socket);
         worker.requests.send(Job::Open).unwrap();
@@ -280,6 +342,15 @@ mod tests {
             .send(Job::Send {
                 target: "LIVE".into(),
                 paths: vec!["/tmp/中文 folder".into()],
+                text: None,
+            })
+            .unwrap();
+        worker
+            .requests
+            .send(Job::Send {
+                target: "LIVE".into(),
+                paths: Vec::new(),
+                text: Some("消息\n第二行🙂\n".into()),
             })
             .unwrap();
         worker.requests.send(Job::Close).unwrap();

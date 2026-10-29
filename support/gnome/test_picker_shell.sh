@@ -25,5 +25,5 @@ env XDG_CONFIG_HOME="$picker_temporary/config" XDG_DATA_HOME="$picker_temporary/
     GIO_USE_VFS=local GIO_USE_VOLUME_MONITOR=unix LS_UI_OUTPUT="$picker_preview" \
     LS_TEST_CLI="${LS_TEST_CLI:-$picker_source/target/release/localsend-cli}" \
     LS_TEST_PICKER="${LS_TEST_PICKER:-$picker_source/target/release/localsend-picker}" \
-    dbus-run-session -- gnome-shell --headless --wayland --no-x11 --virtual-monitor 1280x720 \
+    dbus-run-session -- gnome-shell --headless --wayland --no-x11 --virtual-monitor 1280x900 \
     --automation-script="$picker_source/support/gnome/check_picker_shell.mjs"
