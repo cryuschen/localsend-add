@@ -14,7 +14,7 @@ mod util;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
-pub(crate) const LOCAL_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "-local-unified.3");
+pub(crate) const LOCAL_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "-local-unified.4");
 
 #[derive(Subcommand)]
 pub enum WebCommand {

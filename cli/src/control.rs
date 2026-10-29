@@ -26,6 +26,10 @@ pub(crate) enum Request {
         session_id: String,
         accept: bool,
     },
+    CancelTransfer {
+        session_id: String,
+        direction: String,
+    },
     Devices,
     Refresh {
         timeout_ms: u64,
@@ -78,13 +82,62 @@ pub(crate) struct Listener {
     pub socket: UnixListener,
     path: PathBuf,
     _lock: File,
+    lifecycle: Lifecycle,
+}
+
+/// Written only by the process holding background.lock. It remains readable
+/// after exit so Shell can animate starts/stops initiated by any CLI client.
+#[derive(Serialize)]
+struct Lifecycle {
+    version: u8,
+    id: String,
+    pid: u32,
+    phase: &'static str,
+    started_ms: u64,
+    changed_ms: u64,
+    ready_ms: Option<u64>,
+    stopping_ms: Option<u64>,
+    ended_ms: Option<u64>,
+    #[serde(skip)]
+    directory: PathBuf,
+}
+
+fn unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+impl Lifecycle {
+    fn write(&self) -> anyhow::Result<()> {
+        let temporary = self
+            .directory
+            .join(format!(".lifecycle-{}.tmp", uuid::Uuid::new_v4()));
+        let result = (|| {
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&temporary)?;
+            serde_json::to_writer(&mut file, self)?;
+            file.write_all(b"\n")?;
+            std::fs::rename(&temporary, self.directory.join("lifecycle.json"))?;
+            Ok(())
+        })();
+        let _ = std::fs::remove_file(temporary);
+        result
+    }
 }
 
 impl Listener {
     pub fn bind() -> anyhow::Result<Self> {
-        let path = socket_path();
-        let directory = path.parent().unwrap();
-        std::fs::create_dir_all(directory)?;
+        Self::bind_at(socket_path())
+    }
+
+    fn bind_at(path: PathBuf) -> anyhow::Result<Self> {
+        let directory = path.parent().unwrap().to_path_buf();
+        std::fs::create_dir_all(&directory)?;
         let lock = OpenOptions::new()
             .read(true)
             .write(true)
@@ -103,17 +156,63 @@ impl Listener {
         }
         let socket = UnixListener::bind(&path)?;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
-        Ok(Self {
+        let started_ms = unix_ms();
+        let listener = Self {
             socket,
             path,
             _lock: lock,
-        })
+            lifecycle: Lifecycle {
+                version: 1,
+                id: uuid::Uuid::new_v4().to_string(),
+                pid: std::process::id(),
+                phase: "starting",
+                started_ms,
+                changed_ms: started_ms,
+                ready_ms: None,
+                stopping_ms: None,
+                ended_ms: None,
+                directory,
+            },
+        };
+        listener.lifecycle.write()?;
+        Ok(listener)
+    }
+
+    pub fn ready(&mut self) {
+        self.lifecycle.phase = "running";
+        self.lifecycle.changed_ms = unix_ms();
+        self.lifecycle.ready_ms = Some(self.lifecycle.changed_ms);
+        if let Err(error) = self.lifecycle.write() {
+            eprintln!("Lifecycle: {error:#}");
+        }
+    }
+
+    pub fn stopping(&mut self) {
+        if self.lifecycle.stopping_ms.is_some() {
+            return;
+        }
+        self.lifecycle.phase = "stopping";
+        self.lifecycle.changed_ms = unix_ms();
+        self.lifecycle.stopping_ms = Some(self.lifecycle.changed_ms);
+        if let Err(error) = self.lifecycle.write() {
+            eprintln!("Lifecycle: {error:#}");
+        }
     }
 }
 
 impl Drop for Listener {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.path);
+        self.lifecycle.phase = if self.lifecycle.ready_ms.is_some() {
+            "stopped"
+        } else {
+            "failed"
+        };
+        self.lifecycle.changed_ms = unix_ms();
+        self.lifecycle.ended_ms = Some(self.lifecycle.changed_ms);
+        if let Err(error) = self.lifecycle.write() {
+            eprintln!("Lifecycle: {error:#}");
+        }
     }
 }
 
@@ -528,6 +627,52 @@ pub(crate) fn validate_paths(paths: &[PathBuf], has_text: bool) -> anyhow::Resul
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn lifecycle_is_private_atomic_single_owner_and_survives_exit() {
+        let directory =
+            std::env::temp_dir().join(format!("localsend-lifecycle-{}", uuid::Uuid::new_v4()));
+        let path = directory.join("control.sock");
+        let record = || -> Value {
+            serde_json::from_slice(&std::fs::read(directory.join("lifecycle.json")).unwrap())
+                .unwrap()
+        };
+        let mut listener = Listener::bind_at(path.clone()).unwrap();
+        assert_eq!(record()["phase"], "starting");
+        let id = record()["id"].clone();
+        assert!(Listener::bind_at(path.clone()).is_err());
+        assert_eq!(record()["id"], id);
+        listener.ready();
+        assert_eq!(record()["phase"], "running");
+        listener.stopping();
+        let stopping = record()["stopping_ms"].clone();
+        listener.stopping();
+        assert_eq!(record()["stopping_ms"], stopping);
+        drop(listener);
+        assert!(!path.exists());
+        assert_eq!(record()["phase"], "stopped");
+        assert_eq!(record()["id"], id);
+        assert_eq!(
+            std::fs::metadata(directory.join("lifecycle.json"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        let listener = Listener::bind_at(path.clone()).unwrap();
+        assert_ne!(record()["id"], id);
+        drop(listener);
+        assert_eq!(record()["phase"], "failed");
+        assert!(!std::fs::read_dir(&directory).unwrap().any(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".tmp")
+        }));
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 
     #[test]
     fn rejects_incomplete_and_oversized_control_messages() {

@@ -1,342 +1,253 @@
 import Clutter from 'gi://Clutter';
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
-import Pango from 'gi://Pango';
 import St from 'gi://St';
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import * as PanelMenu from 'resource:///org/gnome/shell/ui/panelMenu.js';
 import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 import {rpc} from './rpc.mjs';
-import {view, selectTransfer} from './model.mjs';
-import {Motion} from './motion.mjs';
-import {Reveal} from './reveal.mjs';
+import {COLORS, Ring} from './ring.mjs';
 
 const nowMs = () => GLib.get_monotonic_time() / 1000;
+const removeSource = id => { if (id && GLib.MainContext.default().find_source_by_id(id)) GLib.Source.remove(id); };
 
-function label(text = '', style = '') {
-    return new St.Label({text, style_class: style, y_align: Clutter.ActorAlign.CENTER});
-}
-
-function button(text, action) {
-    const widget = new St.Button({label: text, style_class: 'ls-transfer-action',
-        can_focus: true, y_align: Clutter.ActorAlign.CENTER});
-    widget.connect('clicked', action);
-    return widget;
-}
-
-class TransferPanel {
+export class RingPanel {
     constructor(extension) {
-        this.extension = extension;
-        this.motion = new Motion();
-        // Child buttons own their click gestures; the outer actor has no gesture.
-        this.indicator = new PanelMenu.Button(0, 'LocalSend 传输', true);
-        this.indicator.add_style_class_name('ls-transfer-group');
-        this.row = new St.BoxLayout({style_class: 'ls-transfer-row'});
-        this.indicator.add_child(this.row);
-        this.peerButton = button('', () => this.indicator.menu.toggle());
-        this.peerButton.set_style('background-color: transparent; padding: 0;');
-        this.peer = label('', 'ls-transfer-peer');
-        this.peer.clutter_text.ellipsize = Pango.EllipsizeMode.NONE;
-        this.peerButton.set_child(this.peer);
-        // Draw in absolute coordinates: the fill always starts at x=0,
-        // independent of BinLayout alignment or the current text direction.
-        this.progress = new St.DrawingArea({style_class: 'ls-transfer-progress',
-            y_align: Clutter.ActorAlign.CENTER});
-        this.progress.connect('repaint', area => this.paintProgress(area));
-        this.accept = button('接收', () => extension.answer(this.current.id, true));
-        this.decline = button('拒绝', () => extension.answer(this.current.id, false));
-        this.open = button('打开', () => this.openFile());
-        this.sent = label('传输成功');
-        this.open.x_align = this.sent.x_align = Clutter.ActorAlign.START;
-        // Invisible actors retain their natural size. Both decision controls and
-        // all four-character results reserve space before they become visible.
-        this.resultBox = new St.Widget({layout_manager: new Clutter.BinLayout(),
-            y_align: Clutter.ActorAlign.CENTER});
-        this.resultBox.add_child(this.open);
-        this.resultBox.add_child(this.sent);
-        this.transferBox = new St.BoxLayout({style_class: 'ls-transfer-row'});
-        this.transferBox.add_child(this.progress);
-        this.transferBox.add_child(this.resultBox);
-        this.decisionBox = new St.BoxLayout({style_class: 'ls-transfer-row'});
-        this.decisionBox.add_child(this.accept);
-        this.decisionBox.add_child(this.decline);
-        this.decisionBox.x_align = this.transferBox.x_align = Clutter.ActorAlign.START;
-        this.body = new St.Widget({layout_manager: new Clutter.BinLayout(),
-            y_align: Clutter.ActorAlign.CENTER});
-        this.body.add_child(this.decisionBox);
-        this.body.add_child(this.transferBox);
-        this.row.add_child(this.peerButton);
-        this.row.add_child(this.body);
-        this.reveal = new Reveal();
-        this.resultReveal = new Reveal();
-        this.row.add_effect_with_name('localsend-reveal', this.reveal);
-        this.resultBox.add_effect_with_name('localsend-result-reveal', this.resultReveal);
-        this.animationSettings = St.Settings.get();
-        this.animationSignal = this.animationSettings.connect('notify::enable-animations', () => {
-            if (this.current) this.tick();
+        this.extension = extension; this.motion = new Ring();
+        this.indicator = new PanelMenu.Button(0, 'LocalSend', true);
+        this.indicator.add_style_class_name('ls-ring-group');
+        this.row = new St.BoxLayout({style_class: 'ls-ring-row'});
+        this.ring = new St.Button({style_class: 'ls-ring-button', can_focus: true,
+            button_mask: St.ButtonMask.ONE | St.ButtonMask.THREE,
+            y_align: Clutter.ActorAlign.CENTER, accessible_name: 'LocalSend：启动后台'});
+        this.drawing = new St.DrawingArea({style_class: 'ls-ring-drawing', y_align: Clutter.ActorAlign.CENTER});
+        this.drawing.connect('repaint', area => this.paint(area)); this.ring.set_child(this.drawing);
+        this.ring.connect('clicked', (_actor, button) => button === 3 ? this.showMenu(true) : this.activate());
+        this.ring.connect('key-press-event', (_actor, event) => {
+            if (event.get_key_symbol() === Clutter.KEY_Menu
+                || event.get_key_symbol() === Clutter.KEY_F10 && event.get_state() & Clutter.ModifierType.SHIFT_MASK) {
+                this.showMenu(true); return Clutter.EVENT_STOP;
+            }
+            return Clutter.EVENT_PROPAGATE;
         });
-        this.indicator.setMenu(new PopupMenu.PopupMenu(this.peerButton, 0, St.Side.TOP));
-        // setMenu() re-enables GNOME's outer press gesture, even with
-        // dontCreateMenu. Only the device-name button should toggle details.
+        this.row.add_child(this.ring);
+        this.decision = new St.BoxLayout({style_class: 'ls-ring-row', visible: false});
+        this.peer = new St.Label({y_align: Clutter.ActorAlign.CENTER}); this.decision.add_child(this.peer);
+        for (const [text, accept] of [['接收', true], ['拒绝', false]]) {
+            const button = new St.Button({label: text, can_focus: true, style_class: 'ls-ring-action', y_align: Clutter.ActorAlign.CENTER});
+            button.connect('clicked', () => extension.answer(this.motion.pending?.id, accept)); this.decision.add_child(button);
+        }
+        this.row.add_child(this.decision); this.indicator.add_child(this.row);
+        this.indicator.setMenu(new PopupMenu.PopupMenu(this.ring, 0, St.Side.TOP));
         this.indicator._clickGesture.set_enabled(false);
         Main.panel.addToStatusArea('localsend-transfer', this.indicator, -1, 'left');
-        this.indicator.container.hide();
+        this.settings = St.Settings.get();
+        this.settingsSignal = this.settings.connect('notify::enable-animations', () => this.tick()); this.tick();
     }
-
-    update(transfer) {
-        this.direction = transfer?.direction;
-        const state = view(transfer, this.direction);
-        this.current = state;
-        if (!state) {
-            this.stopAnimation();
-            this.motion = new Motion();
-            this.frame = null;
-            this.menuKey = null;
-            this.indicator.menu.close();
-            this.indicator.container.hide();
-            this.extension.layout();
-            return;
-        }
-        const fresh = this.motion.update(state, nowMs());
-        if (fresh) this.indicator.menu.close();
-        this.peer.text = state.alias;
-        const pending = state.phase === 'pending';
-        this.decisionBox.opacity = pending ? 255 : 0;
-        this.transferBox.opacity = pending ? 0 : 255;
-        // Four-character results retain the same natural reserved width.
-        this.sent.text = state.isError ? state.phase === 'cancelled' ? '传输取消' : '传输失败' : '传输成功';
-        this.open.opacity = state.canOpen ? 255 : 0;
-        this.sent.opacity = state.sentSuccessfully || state.isError ? 255 : 0;
-        this.tick();
-        this.extension.layout();
-        // Keep an open details menu stable as byte counters change.
-        const key = JSON.stringify([this.direction, state.id, state.phase, state.paths, state.detail]);
-        if (key !== this.menuKey) {
-            this.menuKey = key;
-            this.indicator.menu.removeAll();
-            const addInfo = text => this.indicator.menu.addMenuItem(
-                new PopupMenu.PopupMenuItem(text, {reactive: false, can_focus: false}));
-            addInfo(`设备：${state.alias}`);
-            if (this.direction === 'receive') addInfo(`保存位置：${state.destination}`);
-            if (state.detail) addInfo(state.detail);
-            if (state.file_count > 1 && state.canOpen) addInfo(`共 ${state.file_count} 个文件；顶栏“打开”打开第一个文件`);
-            for (const path of (state.canOpen ? state.paths : [])) {
-                const item = new PopupMenu.PopupMenuItem(GLib.path_get_basename(path));
-                item.connect('activate', () => this.extension.launch(path));
-                this.indicator.menu.addMenuItem(item);
-            }
-        }
+    update(snapshot, lifecycle, time = nowMs(), wall = Date.now()) {
+        this.motion.ingest(snapshot, lifecycle, time, wall);
+        this.decision.visible = Boolean(this.motion.pending); this.peer.text = this.motion.pending?.alias ?? '';
+        for (const child of this.decision.get_children().slice(1)) child.reactive = !this.extension.answering;
+        if (this.menuMode === 'send' && this.motion.phase !== 'idle') this.indicator.menu.close();
+        this.tick(); this.extension.layout();
     }
-
-    openFile() {
-        if (this.open.reactive && this.current?.canOpen) this.extension.launch(this.current.paths[0]);
+    activate() {
+        const phase = this.motion.phase;
+        if (phase === 'off') this.extension.start();
+        else if (phase === 'idle' && !this.motion.pending) this.showMenu(false);
+        else if (phase === 'transfer') this.extension.cancel(this.motion.current);
+        else if (phase === 'error') { this.motion.restore(nowMs()); this.tick(); }
     }
-
-    stopAnimation() {
-        if (this.animationTimer) GLib.Source.remove(this.animationTimer);
-        this.animationTimer = 0;
+    showMenu(context) {
+        if (!context && (this.motion.phase !== 'idle' || this.motion.pending)) return;
+        this.menuMode = context ? 'exit' : 'send'; this.indicator.menu.removeAll();
+        const item = new PopupMenu.PopupMenuItem(context ? '退出' : '发送');
+        item.setSensitive(context ? this.motion.online && !this.extension.stopping : !this.extension.picker);
+        item.connect('activate', () => context ? this.extension.stop() : this.extension.chooseFiles());
+        this.indicator.menu.addMenuItem(item); this.indicator.menu.open();
     }
-
-    fullyRevealed(actor, amount) {
-        if (amount >= 1) return true;
-        const [left] = this.row.get_transformed_position();
-        const [width] = this.row.get_transformed_size();
-        const [x] = actor.get_transformed_position();
-        const [actorWidth] = actor.get_transformed_size();
-        return width > 0 && actorWidth > 0 && (x + actorWidth - left) / width <= 1.24 * amount - 0.24;
-    }
-
     tick() {
-        this.stopAnimation();
-        if (!this.current) return;
-        const frame = this.motion.sample(nowMs(), this.animationSettings.enable_animations);
-        this.frame = frame;
-        this.indicator.container.visible = !frame.expired;
-        if (frame.expired) this.indicator.menu.close();
-        this.reveal.setProgress(frame.reveal);
-        this.resultReveal.setProgress(frame.resultReveal);
-        const pending = this.current.phase === 'pending';
-        const interactive = actor => !frame.expired && this.fullyRevealed(actor, frame.reveal);
-        this.peerButton.reactive = this.peerButton.can_focus = interactive(this.peerButton);
-        for (const actor of [this.accept, this.decline])
-            actor.reactive = actor.can_focus = pending && !this.extension.answering && interactive(actor);
-        this.open.reactive = this.open.can_focus = Boolean(this.current.canOpen)
-            && frame.resultReveal >= 1 && interactive(this.open);
-        this.progress.queue_repaint();
-        if (frame.next !== null) {
-            this.animationTimer = GLib.timeout_add(GLib.PRIORITY_DEFAULT, frame.next, () => {
-                this.animationTimer = 0;
-                this.tick();
-                return GLib.SOURCE_REMOVE;
-            });
-        }
+        removeSource(this.animationTimer); this.animationTimer = 0;
+        this.frame = this.motion.sample(nowMs(), this.settings.enable_animations);
+        const names = {off: '启动后台', idle: '发送文件，右键退出', starting: '后台正在启动', stopping: '后台正在退出',
+            transfer: '取消本次传输', error: '传输失败或取消，单击恢复绿色', success: '传输成功', restoring: '正在恢复绿色'};
+        this.ring.accessible_name = `LocalSend：${names[this.frame.phase]}`; this.drawing.queue_repaint();
+        if (this.frame.next !== null) this.animationTimer = GLib.timeout_add(GLib.PRIORITY_DEFAULT,
+            Math.max(1, Math.ceil(this.frame.next)), () => { this.animationTimer = 0; this.tick(); return GLib.SOURCE_REMOVE; });
     }
-
-    paintProgress(area) {
-        const [width, height] = area.get_surface_size();
-        const context = area.get_context();
-        const radius = Math.min(height / 2, width / 2);
+    paint(area) {
+        const [width, height] = area.get_surface_size(); const context = area.get_context();
+        const diameter = Math.min(width, height);
         try {
-            // Clip the trough and fill together to the same rounded outline.
-            context.arc(width - radius, radius, radius, -Math.PI / 2, 0);
-            context.arc(width - radius, height - radius, radius, 0, Math.PI / 2);
-            context.arc(radius, height - radius, radius, Math.PI / 2, Math.PI);
-            context.arc(radius, radius, radius, Math.PI, Math.PI * 1.5);
-            context.closePath();
-            context.clip();
-            const state = this.current;
-            const fraction = this.frame?.fraction ?? state?.fraction ?? 0;
-            if (state?.isError && fraction === 0)
-                context.setSourceRGBA(1, 0.54, 0.54, 0.35);
-            else
-                context.setSourceRGBA(1, 1, 1, 0.25);
-            context.rectangle(0, 0, width, height);
-            context.fill();
-            const blue = [0.38, 0.63, 0.92];
-            const target = state?.isError ? [1, 0.54, 0.54] : [0.56, 0.94, 0.64];
-            const mix = state?.phase === 'success' || state?.isError ? this.frame?.colorMix ?? 1 : 0;
-            const color = blue.map((value, i) => Math.min(1,
-                value + (target[i] - value) * mix + (this.frame?.pulse ?? 0)));
-            context.setSourceRGB(...color);
-            context.rectangle(0, 0, width * fraction, height);
-            context.fill();
-            if (this.frame?.shine !== null && this.frame?.shine !== undefined && fraction > 0) {
-                context.rectangle(0, 0, width * fraction, height);
-                context.clip();
-                const center = (this.frame.shine * 1.5 - 0.25) * width;
-                const band = width * 0.22;
-                // Small translucent strips form a soft highlight without a second texture.
-                for (let i = 0; i < 16; i++) {
-                    context.setSourceRGBA(1, 1, 1, 0.22 * Math.sin(Math.PI * i / 15));
-                    context.rectangle(center - band / 2 + band * i / 16, 0, band / 16 + 0.2, height);
-                    context.fill();
-                }
+            context.setLineWidth(diameter * 0.08);
+            for (const layer of this.frame?.layers ?? this.motion.layers()) {
+                if (layer.end <= 0) continue;
+                context.setSourceRGB(...COLORS[layer.color]); context.newPath();
+                context.arc(width / 2, height / 2, diameter * 0.42, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * Math.min(1, layer.end));
+                if (layer.end >= 1) context.closePath(); // Closed full strokes avoid a seam.
+                context.stroke();
             }
-        } finally {
-            context.$dispose();
-        }
+        } finally { context.$dispose(); }
     }
-
     destroy() {
-        this.stopAnimation();
-        this.animationSettings.disconnect(this.animationSignal);
-        this.indicator.destroy();
+        removeSource(this.animationTimer); this.animationTimer = 0;
+        this.settings.disconnect(this.settingsSignal); this.indicator.destroy();
     }
 }
 
-export default class LocalSendTransfer extends Extension {
+export default class LocalSendRing extends Extension {
     enable() {
-        this.enabled = true;
-        this.requests = new Set();
-        this.generation = (this.generation ?? 0) + 1;
-        this.transfer = new TransferPanel(this);
+        this.enabled = true; this.requests = new Set(); this.generation = (this.generation ?? 0) + 1;
+        this.config = GLib.build_filenamev([GLib.get_user_config_dir(), 'localsend-cli']);
+        this.pathToSocket = GLib.build_filenamev([this.config, 'control.sock']);
+        this.lifecycleFile = Gio.File.new_for_path(GLib.build_filenamev([this.config, 'lifecycle.json']));
+        this.binary = GLib.build_filenamev([GLib.get_home_dir(), '.local', 'bin', 'localsend-cli']);
+        this.transfer = new RingPanel(this);
         this.panelHeightSignal = Main.panel.connect('notify::height', () => this.layout());
-        this.pathToSocket = GLib.build_filenamev([GLib.get_user_config_dir(), 'localsend-cli', 'control.sock']);
-        this.poll();
-        console.log('[localsend-transfer] enabled');
+        this.watch(); this.poll();
     }
-
+    watch() {
+        this.monitor?.cancel();
+        const directory = Gio.File.new_for_path(this.config); const exists = directory.query_exists(null);
+        this.monitor = (exists ? directory : Gio.File.new_for_path(GLib.get_user_config_dir())).monitor_directory(Gio.FileMonitorFlags.WATCH_MOVES, null);
+        this.monitor.connect('changed', (_monitor, file, other) => {
+            const relevant = [file, other].some(f => ['lifecycle.json', 'control.sock', 'localsend-cli'].includes(f?.get_basename()));
+            if (relevant && this.enabled) {
+                if (!exists && directory.query_exists(null)) this.watch();
+                this.refreshLifecycle();
+            }
+        });
+    }
     layout() {
-        const container = this.transfer?.indicator.container;
-        if (!container) return;
-        const left = Main.panel._leftBox;
-        const vitals = Main.panel.statusArea.vitalsMenu?.container;
+        const container = this.transfer?.indicator.container; if (!container) return;
+        const left = Main.panel._leftBox; const vitals = Main.panel.statusArea.vitalsMenu?.container;
         if (vitals?.get_parent() === left) {
             const children = left.get_children();
-            if (children.indexOf(container) !== children.indexOf(vitals) + 1)
-                left.set_child_above_sibling(container, vitals);
+            if (children.indexOf(container) !== children.indexOf(vitals) + 1) left.set_child_above_sibling(container, vitals);
         }
-        if (container.visible) {
-            container.height = Main.panel.height;
-            this.transfer.indicator.height = Main.panel.height;
-        }
+        container.height = Main.panel.height; this.transfer.indicator.height = Main.panel.height;
     }
-
     schedule(delay) {
-        if (!this.enabled) return;
-        if (this.timer) GLib.Source.remove(this.timer);
-        this.timer = GLib.timeout_add(GLib.PRIORITY_DEFAULT, Math.max(10, delay), () => {
-            this.timer = 0;
-            this.poll();
-            return GLib.SOURCE_REMOVE;
+        if (!this.enabled) return; removeSource(this.timer);
+        this.timer = GLib.timeout_add(GLib.PRIORITY_DEFAULT, Math.max(10, Math.ceil(delay)), () => {
+            this.timer = 0; this.poll(); return GLib.SOURCE_REMOVE;
         });
     }
-
     async request(message) {
-        const cancel = new Gio.Cancellable();
-        this.requests.add(cancel);
-        const timeout = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 2200, () => {
-            cancel.cancel();
-            return GLib.SOURCE_REMOVE;
-        });
+        const cancel = new Gio.Cancellable(); this.requests.add(cancel);
+        const timeout = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 2200, () => { cancel.cancel(); return GLib.SOURCE_REMOVE; });
         try { return await rpc(this.pathToSocket, message, cancel); }
-        finally {
-            // Removing an expired source logs an error; only remove a live one.
-            if (GLib.MainContext.default().find_source_by_id(timeout)) GLib.Source.remove(timeout);
-            this.requests.delete(cancel);
-        }
+        finally { removeSource(timeout); this.requests.delete(cancel); }
     }
-
-    render(snapshot) {
-        const state = selectTransfer(snapshot);
-        this.transfer.update(state);
-        const expiry = state?.remaining_ms;
-        // Completion expiry remains measured by the CLI, not by this poll.
-        this.schedule(state ? Math.min(200, Number.isFinite(expiry) ? expiry : 200) : 1000);
-    }
-
-    async poll() {
-        if (!this.enabled || this.polling) return;
-        this.polling = true;
-        const generation = this.generation ?? 0;
+    async readLifecycle() {
+        const cancel = new Gio.Cancellable(); this.requests.add(cancel);
         try {
-            const snapshot = await this.request({command: 'panel'});
-            if (this.enabled && generation === (this.generation ?? 0)) this.render(snapshot);
-        } catch (_) {
-            if (this.enabled && generation === (this.generation ?? 0)) {
-                this.transfer.update(null);
-                this.schedule(1000);
-            }
+            return await new Promise(resolve => this.lifecycleFile.load_contents_async(cancel, (file, result) => {
+                try {
+                    const [, bytes] = file.load_contents_finish(result);
+                    resolve(bytes.length <= 8192 ? JSON.parse(new TextDecoder().decode(bytes)) : null);
+                } catch (_) { resolve(null); }
+            }));
+        } finally { this.requests.delete(cancel); }
+    }
+    async refreshLifecycle() {
+        if (this.readingLifecycle) { this.lifecycleAgain = true; return; }
+        this.readingLifecycle = true;
+        const generation = this.generation;
+        try {
+            const lifecycle = await this.readLifecycle();
+            if (!this.enabled || generation !== this.generation || !lifecycle) return;
+            const ended = ['stopped', 'failed'].includes(lifecycle.phase)
+                && (!this.snapshot?.pid || lifecycle.pid === this.snapshot.pid);
+            // Do not wait for a socket RPC timeout before showing a slow start
+            // or shutdown. The owning daemon writes completion after cleanup.
+            this.render(ended ? null : this.snapshot, lifecycle);
         } finally {
-            this.polling = false;
-            if (this.enabled && !this.timer) this.schedule(200);
+            this.readingLifecycle = false;
+            if (this.enabled) {
+                this.schedule(10);
+                if (this.lifecycleAgain) { this.lifecycleAgain = false; this.refreshLifecycle(); }
+            }
         }
     }
-
+    render(snapshot, lifecycle = this.lifecycle) {
+        this.snapshot = snapshot; this.lifecycle = lifecycle; this.transfer.update(snapshot, lifecycle);
+        const active = this.transfer.motion.phase !== 'idle' && this.transfer.motion.phase !== 'off';
+        this.schedule(active || this.transfer.motion.pending ? 200 : 1000);
+    }
+    async poll() {
+        if (!this.enabled) return;
+        if (this.polling) { this.schedule(100); return; }
+        this.polling = true; const generation = this.generation;
+        try {
+            const [response, lifecycle] = await Promise.allSettled([this.request({command: 'panel'}), this.readLifecycle()]);
+            if (!this.enabled || generation !== this.generation) return;
+            if (response.status === 'fulfilled' && response.value.ok) this.render(response.value, lifecycle.value);
+            else {
+                const error = response.reason;
+                const gone = !Gio.File.new_for_path(this.pathToSocket).query_exists(null)
+                    || error?.matches?.(Gio.io_error_quark(), Gio.IOErrorEnum.CONNECTION_REFUSED);
+                this.render(gone ? null : this.snapshot, lifecycle.value); // Timeout is not proof of exit.
+            }
+        } finally { this.polling = false; if (this.enabled && !this.timer) this.schedule(200); }
+    }
     async answer(id, accept) {
-        if (this.answering) return;
-        this.answering = true;
-        this.generation = (this.generation ?? 0) + 1;
-        if (this.transfer.current) this.transfer.update(this.transfer.current);
+        if (!id || this.answering) return; this.answering = true; this.generation++;
         try {
             const snapshot = await this.request({command: 'answer_transfer', session_id: id, accept});
-            if (this.enabled && snapshot.ok) this.render(snapshot);
-        } catch (error) {
-            console.warn(`[localsend-transfer] answer: ${error.message}`);
-        } finally {
-            this.answering = false;
-            if (this.enabled) this.schedule(10);
-        }
+            if (!snapshot.ok) throw new Error(snapshot.error);
+            if (this.enabled) this.render(snapshot);
+        } catch (error) { if (this.enabled) Main.notifyError('LocalSend', error.message); }
+        finally { this.answering = false; if (this.enabled) this.schedule(10); }
     }
-
-    launch(path) {
-        Gio.AppInfo.launch_default_for_uri_async(Gio.File.new_for_path(path).get_uri(),
-            global.create_app_launch_context(0, -1), null, (_source, result) => {
-                try { Gio.AppInfo.launch_default_for_uri_finish(result); }
-                catch (error) { console.warn(`[localsend-transfer] open: ${error.message}`); }
+    async cancel(transfer) {
+        if (!transfer || this.cancelling) return; this.cancelling = true; this.generation++;
+        try {
+            const snapshot = await this.request({command: 'cancel_transfer', session_id: transfer.id, direction: transfer.direction});
+            if (!snapshot.ok) throw new Error(snapshot.error);
+            if (this.enabled) this.render(snapshot);
+        } catch (error) { if (this.enabled) Main.notifyError('LocalSend', error.message); }
+        finally { this.cancelling = false; if (this.enabled) this.schedule(10); }
+    }
+    async run(argv) {
+        const process = Gio.Subprocess.new(argv, Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_PIPE);
+        const cancel = new Gio.Cancellable(); this.requests.add(cancel);
+        const timeout = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 15000, () => { cancel.cancel(); process.force_exit(); return GLib.SOURCE_REMOVE; });
+        try {
+            const [, stdout, stderr] = await new Promise((resolve, reject) => process.communicate_utf8_async(null, cancel,
+                (source, result) => { try { resolve(source.communicate_utf8_finish(result)); } catch (error) { reject(error); } }));
+            if (!process.get_successful()) throw new Error(stderr.trim() || stdout.trim() || 'LocalSend 操作失败');
+        } finally { removeSource(timeout); this.requests.delete(cancel); }
+    }
+    async start() {
+        if (this.starting || this.transfer.motion.phase !== 'off') return;
+        this.starting = true; this.transfer.motion.beginLifecycle('starting', nowMs()); this.transfer.tick();
+        try { await this.run([this.binary, 'start', '--json']); }
+        catch (error) { if (this.enabled) Main.notifyError('LocalSend', error.message); }
+        finally { this.starting = false; if (this.enabled) this.schedule(10); }
+    }
+    async stop() {
+        if (this.stopping || !this.transfer.motion.online) return; this.stopping = true;
+        try { await this.run([this.binary, 'stop', '--force']); }
+        catch (error) { if (this.enabled) Main.notifyError('LocalSend', error.message); }
+        finally { this.stopping = false; if (this.enabled) this.schedule(10); }
+    }
+    chooseFiles() {
+        if (this.picker) return;
+        try {
+            const helper = GLib.build_filenamev([this.path, 'send_dialog.py']);
+            this.picker = Gio.Subprocess.new(['/usr/bin/python3', helper, '--binary', this.binary], Gio.SubprocessFlags.NONE);
+            this.picker.wait_async(null, (source, result) => {
+                try { source.wait_finish(result); } catch (_) { /* Selector was closed. */ } this.picker = null;
             });
+        } catch (error) { Main.notifyError('LocalSend', error.message); }
     }
-
     disable() {
-        this.enabled = false;
-        if (this.panelHeightSignal) Main.panel.disconnect(this.panelHeightSignal);
-        this.panelHeightSignal = 0;
-        if (this.timer) GLib.Source.remove(this.timer);
-        this.timer = 0;
+        this.enabled = false; this.generation++; removeSource(this.timer); this.timer = 0;
+        this.monitor?.cancel(); this.monitor = null;
         for (const request of this.requests) request.cancel();
-        this.transfer?.destroy();
-        this.transfer = null;
-        console.log('[localsend-transfer] disabled');
+        if (this.panelHeightSignal) Main.panel.disconnect(this.panelHeightSignal); this.panelHeightSignal = 0;
+        this.transfer?.destroy(); this.transfer = null; this.picker?.force_exit(); this.picker = null;
     }
 }

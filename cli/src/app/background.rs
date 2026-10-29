@@ -155,7 +155,7 @@ pub(crate) fn read_text(value: &str) -> anyhow::Result<String> {
     Ok(String::from_utf8(sending::read_text(value)?.to_vec())?)
 }
 
-pub(crate) async fn run(storage: Repository, listener: Listener) -> anyhow::Result<()> {
+pub(crate) async fn run(storage: Repository, mut listener: Listener) -> anyhow::Result<()> {
     std::fs::create_dir_all(&storage.destination)?;
     let Network {
         server,
@@ -207,6 +207,7 @@ pub(crate) async fn run(storage: Repository, listener: Listener) -> anyhow::Resu
         probe_limit: Arc::new(tokio::sync::Semaphore::new(16)),
     };
     state.announce();
+    listener.ready();
     println!(
         "LocalSend background ready: {} (port {})",
         state.app.storage.identity.alias, state.app.storage.identity.port
@@ -249,7 +250,7 @@ pub(crate) async fn run(storage: Repository, listener: Listener) -> anyhow::Resu
                 let response = state.control(request).await;
                 let should_stop = stop && response["ok"] == true;
                 let _ = reply.send(response);
-                if should_stop { break; }
+                if should_stop { listener.stopping(); break; }
                 continue;
             }
             Some(event) = server_rx.recv() => AppEvent::Server(event),
@@ -276,6 +277,7 @@ pub(crate) async fn run(storage: Repository, listener: Listener) -> anyhow::Resu
         };
         state.event(event).await;
     }
+    listener.stopping();
     if let Some(task) = state.discovery_task.take() {
         task.abort();
     }
@@ -318,6 +320,12 @@ impl Background {
             .as_ref()
             .map(|(id, _)| id.clone())
             .unwrap_or_default();
+        if let Some(transfer) = &self.last_send
+            && transfer.id == id
+            && transfer.phase == Phase::Cancelled
+        {
+            return Some(transfer.clone());
+        }
         Some(Transfer::running(
             id,
             send.alias.clone(),
@@ -356,7 +364,7 @@ impl Background {
                     .as_ref()
                     .and_then(|t| t.snapshot(destination))
             });
-        json!({"ok":true,"receive":receive,"send":send})
+        json!({"ok":true,"running":true,"pid":std::process::id(),"receive":receive,"send":send})
     }
 
     fn check_reachability(&mut self) {
@@ -514,6 +522,53 @@ impl Background {
         self.app.expire_pending(Instant::now());
         match request {
             Request::Panel => Ok(self.panel()),
+            Request::CancelTransfer {
+                session_id,
+                direction,
+            } => {
+                match direction.as_str() {
+                    "receive" => {
+                        ensure!(
+                            self.app
+                                .receive
+                                .as_ref()
+                                .is_some_and(|r| r.session_id == session_id),
+                            "This incoming transfer has already ended"
+                        );
+                        self.app.cancel_receive();
+                    }
+                    "send" => {
+                        if self
+                            .active
+                            .as_ref()
+                            .is_some_and(|(id, _)| id == &session_id)
+                        {
+                            let mut transfer = self
+                                .send_progress()
+                                .ok_or_else(|| anyhow::anyhow!("This send has already ended"))?;
+                            if transfer.phase != Phase::Cancelled {
+                                transfer.finish(Phase::Cancelled);
+                                self.last_send = Some(transfer);
+                            }
+                            self.app.send.as_ref().unwrap().cancel.token.cancel();
+                        } else {
+                            let index = self
+                                .queue
+                                .iter()
+                                .position(|j| j.id == session_id)
+                                .ok_or_else(|| anyhow::anyhow!("This send has already ended"))?;
+                            let job = self.queue.remove(index).unwrap();
+                            let mut transfer =
+                                Transfer::running(job.id.clone(), job.label.clone(), 0, 0);
+                            transfer.finish(Phase::Cancelled);
+                            self.last_send = Some(transfer);
+                            self.finish(job.id, job.label, false, "已取消排队发送");
+                        }
+                    }
+                    _ => anyhow::bail!("Invalid transfer direction"),
+                }
+                Ok(self.panel())
+            }
             Request::AnswerTransfer { session_id, accept } => {
                 ensure!(
                     self.app
@@ -957,18 +1012,26 @@ impl Background {
         if let AppEvent::SendEnded { success, cancelled } = &event
             && let Some((id, alias)) = self.active.take()
         {
-            let mut transfer = self
-                .send_progress()
-                .unwrap_or_else(|| Transfer::running(id.clone(), alias.clone(), 0, 0));
+            let cancelled_early = self
+                .last_send
+                .as_ref()
+                .filter(|t| t.id == id && t.phase == Phase::Cancelled)
+                .cloned();
+            let mut transfer = cancelled_early.clone().unwrap_or_else(|| {
+                self.send_progress()
+                    .unwrap_or_else(|| Transfer::running(id.clone(), alias.clone(), 0, 0))
+            });
             transfer.id = id.clone();
             transfer.detail = self.send_detail.clone();
-            transfer.finish(if *success {
-                Phase::Success
-            } else if *cancelled {
-                Phase::Cancelled
-            } else {
-                Phase::Failed
-            });
+            if cancelled_early.is_none() {
+                transfer.finish(if *success {
+                    Phase::Success
+                } else if *cancelled {
+                    Phase::Cancelled
+                } else {
+                    Phase::Failed
+                });
+            }
             self.last_send = Some(transfer);
             self.finish(
                 id,

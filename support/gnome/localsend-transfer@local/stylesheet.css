@@ -1,6 +1,8 @@
-.ls-transfer-row { spacing: 4px; }
-.ls-transfer-group { -minimum-hpadding: 3px; -natural-hpadding: 5px; }
-.ls-transfer-action { padding: 1px 4px; border-radius: 4px; background-color: rgba(255,255,255,0.12); }
-.ls-transfer-action:hover { background-color: rgba(255,255,255,0.25); }
-.ls-transfer-action:insensitive { color: rgba(255,255,255,0.35); background-color: transparent; }
-.ls-transfer-progress { width: 60px; height: 6px; }
+.ls-ring-group { -minimum-hpadding: 3px; -natural-hpadding: 5px; }
+.ls-ring-row { spacing: 5px; }
+.ls-ring-button { padding: 0 2px; border-radius: 4px; background-color: transparent; }
+.ls-ring-button:hover { background-color: rgba(255,255,255,0.08); }
+.ls-ring-drawing { width: 22px; height: 22px; }
+.ls-ring-action { padding: 1px 5px; border-radius: 4px; background-color: rgba(255,255,255,0.12); }
+.ls-ring-action:hover { background-color: rgba(255,255,255,0.25); }
+.ls-ring-action:insensitive { color: rgba(255,255,255,0.35); }

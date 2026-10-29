@@ -15,6 +15,7 @@ pub(super) enum Phase {
     Cancelled,
 }
 
+#[derive(Clone)]
 pub(super) struct Transfer {
     pub id: String,
     pub alias: String,

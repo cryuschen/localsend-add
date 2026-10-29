@@ -441,11 +441,12 @@ async fn unified_management_preserves_real_tls_receiving_and_browser_modes() {
     let prepared = request.await.unwrap().unwrap().response.unwrap();
     let port = f.state.app.server.port();
     let upload_peer = peer.clone();
+    let upload_fingerprint = server_fingerprint.clone();
     let upload = tokio::spawn(async move {
         let client = LsHttpClientV2::try_new(
             &upload_peer.key_pem,
             &upload_peer.cert_pem,
-            Some(server_fingerprint),
+            Some(upload_fingerprint),
             None,
         )
         .unwrap();
@@ -470,6 +471,31 @@ async fn unified_management_preserves_real_tls_receiving_and_browser_modes() {
         b"abcdef"
     );
     assert_eq!(f.state.panel()["receive"]["phase"], "success");
+    // The ring cancels a session by ID, without touching unrelated jobs or
+    // cancelling a replacement request that raced with a stale pointer click.
+    let request = offer(file(None), f.state.app.server.port());
+    f.pump(|s| s.app.receive.is_some()).await;
+    let active_id = f.state.app.receive.as_ref().unwrap().session_id.clone();
+    request.await.unwrap().unwrap();
+    let stale = f
+        .state
+        .control(Request::CancelTransfer {
+            session_id: "already-finished".into(),
+            direction: "receive".into(),
+        })
+        .await;
+    assert_eq!(stale["ok"], false);
+    assert!(f.state.app.receive.is_some());
+    let cancelled = f
+        .state
+        .control(Request::CancelTransfer {
+            session_id: active_id,
+            direction: "receive".into(),
+        })
+        .await;
+    assert_eq!(cancelled["receive"]["phase"], "cancelled");
+    assert_eq!(cancelled["running"], true);
+    tokio::time::sleep(Duration::from_millis(50)).await;
     // Both browser modes are now managed by the same backend and original server code.
     let share = f
         .state
@@ -505,5 +531,76 @@ async fn unified_management_preserves_real_tls_receiving_and_browser_modes() {
     );
     assert_eq!(f.state.control(Request::WebStop).await["ok"], true);
     assert_eq!(f.state.announcement_rounds, 0);
+    f.finish().await;
+}
+
+#[tokio::test]
+async fn ring_send_cancellation_freezes_progress_and_preserves_other_queued_jobs() {
+    use std::sync::atomic::AtomicU64;
+    let mut f = Fixture::new().await;
+    f.state.active = Some(("active".into(), "peer".into()));
+    f.state.app.send = Some(sending::SendState {
+        session_id: Some("wire-session".into()),
+        alias: "peer".into(),
+        host: "127.0.0.1".into(),
+        total_bytes: 100,
+        sent: Arc::new(AtomicU64::new(37)),
+        cancel: crate::send_task::SendCancel::new(),
+        speed: crate::util::SpeedMeter::new(),
+    });
+    f.state.queue.push_back(Job {
+        id: "queued".into(),
+        target: "other".into(),
+        label: "other".into(),
+        payload: Payload::Text("test".into()),
+        created: Instant::now(),
+    });
+    let result = f
+        .state
+        .control(Request::CancelTransfer {
+            session_id: "active".into(),
+            direction: "send".into(),
+        })
+        .await;
+    assert_eq!(result["send"]["phase"], "cancelled");
+    assert_eq!(result["send"]["bytes"], 37);
+    assert_eq!(f.state.queue.len(), 1);
+    assert!(
+        f.state
+            .app
+            .send
+            .as_ref()
+            .unwrap()
+            .cancel
+            .token
+            .is_cancelled()
+    );
+    let ended = f.state.last_send.as_ref().unwrap().ended;
+    f.state
+        .app
+        .send
+        .as_ref()
+        .unwrap()
+        .sent
+        .store(45, Ordering::Relaxed);
+    assert_eq!(f.state.panel()["send"]["bytes"], 37);
+    f.state
+        .event(AppEvent::SendEnded {
+            success: false,
+            cancelled: true,
+        })
+        .await;
+    assert_eq!(f.state.last_send.as_ref().unwrap().bytes, 37);
+    assert_eq!(f.state.last_send.as_ref().unwrap().ended, ended);
+    let result = f
+        .state
+        .control(Request::CancelTransfer {
+            session_id: "queued".into(),
+            direction: "send".into(),
+        })
+        .await;
+    assert_eq!(result["ok"], true);
+    assert!(f.state.queue.is_empty());
+    assert!(f.state.app.send.is_none());
     f.finish().await;
 }
