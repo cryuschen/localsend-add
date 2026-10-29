@@ -5,10 +5,14 @@ import St from 'gi://St';
 import Clutter from 'gi://Clutter';
 import Pango from 'gi://Pango';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
+import * as Scripting from 'resource:///org/gnome/shell/ui/scripting.js';
 const pause = ms => new Promise(resolve => GLib.timeout_add(GLib.PRIORITY_DEFAULT, ms, () => {resolve(); return GLib.SOURCE_REMOVE;}));
 function check(ok, text) { if (!ok) throw new Error(text); }
 
 export async function run() {
+    // Correctness checks can outlive the perf helper's idle timeout. The
+    // isolated Wayland/DBus session owns helper cleanup, not its final Exit RPC.
+    await Scripting.disableHelperAutoExit();
     await pause(1200);
     let ext = Main.extensionManager.lookup('localsend-transfer@local');
     if (!ext) {
@@ -36,9 +40,9 @@ export async function run() {
         check(e.transfer.indicator.container===originalRow,'same row reused');
     };
     receive(base);
-    await pause(400);
+    await pause(700);
     onlyOnePanel();
-    check(panel.indicator.container.visible && !panel.open.visible && !panel.open.reactive,'receiving state');
+    check(panel.indicator.container.visible && !panel.open.opacity && !panel.open.reactive,'receiving state');
     check(panel.peer.text === base.alias && panel.peer.clutter_text.ellipsize === Pango.EllipsizeMode.NONE,
         'device name remains complete without ellipsis');
     receive({...base,alias:'完整设备名称——这是一台接收文件的电脑'});
@@ -58,7 +62,8 @@ export async function run() {
     check(Math.abs(textY-vitalsY)<=1,'text aligns with panel baseline');
     check(!panel.row.get_children().some(child=>child instanceof St.Button && child.get_label()==='打开文件夹'),'folder action removed');
     const visibleActors = expected => {
-        const actual = panel.row.get_children().filter(child => child.visible);
+        const actual = [panel.peerButton,panel.accept,panel.decline,panel.progress,panel.open,panel.sent]
+            .filter(child => child.get_paint_opacity() > 0);
         check(actual.length === expected.length && actual.every((child, i) => child === expected[i]),
             'only device, progress and applicable actions visible');
     };
@@ -73,7 +78,7 @@ export async function run() {
     const geometry={};
     for (const percent of [0,25,50,75,100]) {
         receive({...base,bytes:percent});
-        await pause(150);
+        await pause(650);
         const [x,y]=panel.progress.get_transformed_position();
         const [width,height]=panel.progress.get_transformed_size();
         geometry[percent]={x,y,width,height};
@@ -83,11 +88,12 @@ export async function run() {
         ['failed-50','failed',50],['cancelled-50','cancelled',50],
         ['failed-0','failed',0],['cancelled-0','cancelled',0],['success','success',50],
     ]) {
-        receive({...base,phase,bytes,remaining_ms:4500,detail:'测试失败原因'});
-        await pause(150);
+        receive({...base,id:name,phase,bytes,remaining_ms:4500,detail:'测试失败原因'});
+        await pause(650);
         check(panel.current.fraction === (phase === 'success' ? 1 : bytes / 100), 'terminal fraction retained');
         check(panel.open.reactive === (phase === 'success'), 'open enabled only after success');
-        visibleActors(phase === 'success' ? [panel.peerButton,panel.progress,panel.open] : [panel.peerButton,panel.progress]);
+        visibleActors(phase === 'success' ? [panel.peerButton,panel.progress,panel.open] : [panel.peerButton,panel.progress,panel.sent]);
+        if (phase !== 'success') check(panel.sent.text === (phase === 'cancelled' ? '传输取消' : '传输失败'), 'explicit error result');
         if (phase === 'success')
             check(panel.open.get_theme_node().get_font().equal(expectedFont), 'open uses panel font');
         const [x,y]=panel.progress.get_transformed_position();
@@ -110,7 +116,7 @@ export async function run() {
     };
     const pointer=global.stage.context.get_backend().get_default_seat().create_virtual_device(Clutter.InputDeviceType.POINTER_DEVICE);
     async function click(widget) {
-        await pause(150);
+        await pause(650);
         const [x,y]=widget.get_transformed_position();
         const [width,height]=widget.get_transformed_size();
         print(`CLICK target=${widget} rect=${x},${y},${width},${height} reactive=${widget.reactive} outerGesture=${panel.indicator._clickGesture.enabled}`);
@@ -124,7 +130,7 @@ export async function run() {
     await click(panel.accept);
     check(clicks.length===1 && clicks[0].command==='answer_transfer' && clicks[0].session_id===base.id && clicks[0].accept,
         'actual pointer accept sends the current session decision: '+JSON.stringify(clicks));
-    check(panel.current.phase==='running' && panel.progress.visible && !panel.accept.visible, 'accept switches to progress');
+    check(panel.current.phase==='running' && panel.transferBox.opacity===255 && !panel.decisionBox.opacity, 'accept switches to progress');
     receive({...base,phase:'pending'});
     await click(panel.decline);
     check(clicks.length===2 && !clicks[1].accept,'actual pointer decline sends rejection');
@@ -138,6 +144,7 @@ export async function run() {
     e.enabled=false;
     await pause(200);await capture('panel-pending');
     receive({...base,phase:'success',remaining_ms:4999});
+    await pause(650);
     check(panel.open.reactive,'successful open action');
     const launches=[];e.launch=path=>launches.push(path);await click(panel.open);
     check(launches[0]===base.paths[0],'actual file path');
@@ -158,7 +165,7 @@ export async function run() {
     await capture('panel-sending');
     for (const phase of ['success','failed','cancelled']) {
         send({...base,phase,remaining_ms:4000});
-        visibleActors(phase === 'success' ? [panel.peerButton,panel.progress,panel.sent] : [panel.peerButton,panel.progress]);
+        visibleActors([panel.peerButton,panel.progress,panel.sent]);
         if (phase === 'success') {
             check(panel.sent.text === '传输成功', 'successful sending text');
             check(panel.sent.get_theme_node().get_font().equal(expectedFont), 'success text uses system font');
@@ -169,7 +176,45 @@ export async function run() {
     }
     receive(null);check(!panel.indicator.container.visible,'decline or idle hides the panel');
     send({...base,phase:'success',remaining_ms:0});check(!panel.indicator.container.visible,'expired result hidden');
+    // A fresh ID gets one continuous entrance; fast completion never resets it.
+    receive({...base,id:'fast',bytes:2});
+    const entranceStart=panel.motion.started;
+    await pause(150);
+    receive({...base,id:'fast',phase:'success',remaining_ms:4999});
+    check(panel.motion.started===entranceStart,'fast completion preserves entrance clock');
+    check(panel.frame.fraction===1 && !panel.open.reactive,'real success immediate, transparent action not clickable');
+    await pause(700);
+    check(panel.frame.reveal===1 && panel.frame.resultReveal===1 && panel.open.reactive,'uniform entrance completes');
+    const stable=()=>[panel.row.width,panel.body.width,panel.progress.get_transformed_position()[0]];
+    const completedGeometry=stable();
+    receive({...base,id:'fast',phase:'running',bytes:80});
+    await pause(100);
+    check(JSON.stringify(stable())===JSON.stringify(completedGeometry),'result appearance cannot move progress or resize row');
+    receive({...base,id:'fast',phase:'pending'});
+    await pause(100);
+    check(JSON.stringify(stable())===JSON.stringify(completedGeometry),'decision-to-progress keeps layout stable');
+    receive({...base,id:'expiry',phase:'success',remaining_ms:1200});
+    await pause(950);
+    check(panel.frame.reveal>0 && panel.frame.reveal<1,'native soft edge fades before expiry');
+    await capture('panel-motion-exit');
+    await pause(300);
+    check(!panel.indicator.container.visible && !panel.animationTimer,'deadline hides and stops animation even without polling');
+    receive({...base,id:'old',phase:'success',remaining_ms:300});
+    receive({...base,id:'new',bytes:20});
+    await pause(700);
+    check(panel.indicator.container.visible && panel.current.id==='new','old result cannot hide a new transfer');
+    const preferences=new Gio.Settings({schema_id:'org.gnome.desktop.interface'});
+    const animationsBefore=preferences.get_boolean('enable-animations');
+    preferences.set_boolean('enable-animations',false);
+    receive({...base,id:'reduced',phase:'success',remaining_ms:5000});
+    await pause(100);
+    check(panel.frame.reveal===1 && panel.frame.resultReveal===1 && panel.open.reactive,
+        'system animation switch updates native effects and buttons immediately');
+    preferences.set_boolean('enable-animations',animationsBefore);
+    await pause(100);
+    receive({...base,id:'cleanup',phase:'success',remaining_ms:5000});
     e.disable();
+    check(!panel.animationTimer,'disable cancels animation timer');
     check(!Main.panel.statusArea['localsend-transfer'],'disable removes the only transfer panel');
     print('PASS: one reused panel for receive/send, batch first file, fonts, baseline, progress, decision buttons, failures and expiry');
 }

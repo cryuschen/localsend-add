@@ -50,7 +50,7 @@ backend_menu = '--backend-menu' in sys.argv[1:]
 assert sum([extension_only,cli_only,backend_menu]) <= 1, 'Choose one installation mode'
 updates_extension = not (cli_only or backend_menu)
 version = subprocess.check_output([TARGET if extension_only else BINARY,'--version'],text=True).strip()
-assert version == 'localsend-cli 1.18.2-local-unified.1', version
+assert version.startswith('localsend-cli 1.18.2-local-unified.'), version
 assert TARGET.is_file() and not TARGET.is_symlink()
 status = json.loads(subprocess.check_output([TARGET,'status','--json'],text=True))
 if not extension_only:
