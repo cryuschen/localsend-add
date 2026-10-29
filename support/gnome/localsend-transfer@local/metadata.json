@@ -3,5 +3,5 @@
   "name": "LocalSend 圆环",
   "description": "常驻圆环：后台启停、收发进度、取消与接收确认；共用 CLI 和文件管理器后台。",
   "shell-version": ["50"],
-  "version": 12
+  "version": 13
 }

@@ -250,8 +250,8 @@ export default class LocalSendRing extends Extension {
     chooseFiles() {
         if (this.picker) return;
         try {
-            const helper = GLib.build_filenamev([this.path, 'send_dialog.py']);
-            this.picker = Gio.Subprocess.new(['/usr/bin/python3', helper, '--binary', this.binary], Gio.SubprocessFlags.NONE);
+            const helper = Gio.File.new_for_path(this.binary).get_parent().get_child('localsend-picker').get_path();
+            this.picker = Gio.Subprocess.new([helper], Gio.SubprocessFlags.NONE);
             this.picker.wait_async(null, (source, result) => {
                 try { source.wait_finish(result); } catch (_) { /* Selector was closed. */ } this.picker = null;
             });

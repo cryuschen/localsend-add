@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "cli",
+    "picker",
     "packages/core",
     "packages/localsend_isolates/rust",
     "server",

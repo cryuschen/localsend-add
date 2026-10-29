@@ -14,8 +14,10 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[3]
 SOURCE = ROOT / 'source'
 BINARY = SOURCE / 'target/release/localsend-cli'
+PICKER_BINARY = SOURCE / 'target/release/localsend-picker'
 HOME_DIR = Path.home()
 TARGET = HOME_DIR / '.local/bin/localsend-cli'
+PICKER_TARGET = HOME_DIR / '.local/bin/localsend-picker'
 EXTENSION = HOME_DIR / '.local/share/gnome-shell/extensions/localsend-transfer@local'
 MENU = HOME_DIR / '.local/share/nautilus-python/extensions/localsend_menu.py'
 UUID = 'localsend-transfer@local'
@@ -47,28 +49,33 @@ def set_settings(key, value):
 extension_only = '--extension-only' in sys.argv[1:]
 cli_only = '--cli-only' in sys.argv[1:]
 backend_menu = '--backend-menu' in sys.argv[1:]
-assert sum([extension_only,cli_only,backend_menu]) <= 1, 'Choose one installation mode'
+picker_only = '--picker-only' in sys.argv[1:]
+assert sum([extension_only,cli_only,backend_menu,picker_only]) <= 1, 'Choose one installation mode'
 updates_extension = not (cli_only or backend_menu)
-version = subprocess.check_output([TARGET if extension_only else BINARY,'--version'],text=True).strip()
+version = subprocess.check_output([TARGET if extension_only or picker_only else BINARY,'--version'],text=True).strip()
 assert version.startswith('localsend-cli 1.18.2-local-unified.'), version
 assert TARGET.is_file() and not TARGET.is_symlink()
 status = json.loads(subprocess.check_output([TARGET,'status','--json'],text=True))
-if not extension_only:
+if not (extension_only or picker_only):
     assert not status.get('sending') and not status.get('receiving') and not status.get('pending_sender') and not status.get('queued'), 'Wait until transfers and incoming requests are idle before installing'
 config = HOME_DIR / '.config/localsend-cli'
 config_hashes = {p.name:digest(p) for p in [config/'config.toml',config/'identity.pem',config/'paired-v2.json']}
 backup = ROOT/'development-setup'/datetime.now(ZoneInfo('Asia/Shanghai')).strftime('panel-backup-%Y%m%d-%H%M%S')
 backup.mkdir(mode=0o700)
-plan = [] if extension_only else [(BINARY,TARGET,0o755)]
+plan = [] if extension_only or picker_only else [(BINARY,TARGET,0o755)]
 if not cli_only:
-    if not extension_only: plan.append((SOURCE/'support/nautilus/localsend_menu.py',MENU,0o644))
+    if not (extension_only or picker_only): plan.append((SOURCE/'support/nautilus/localsend_menu.py',MENU,0o644))
     if updates_extension:
-        plan += [(path,EXTENSION/path.name,0o644) for path in sorted((Path(__file__).parent/UUID).iterdir()) if path.is_file()]
+        assert subprocess.check_output([PICKER_BINARY,'--version'],text=True).strip() == 'localsend-picker 1.18.2'
+        plan.append((PICKER_BINARY,PICKER_TARGET,0o755))
+        plan += [(path,EXTENSION/path.name,0o644) for path in sorted((Path(__file__).parent/UUID).iterdir())
+                 if path.is_file() and (not picker_only or path.name in {'extension.js','metadata.json','send_dialog.py'})]
 manifest = {'version':version,'backup':str(backup),'files':[], 'config_sha256':config_hashes,
             'enabled_before':settings('enabled-extensions'),'disabled_before':settings('disabled-extensions'),
             'was_running':status.get('running',False),'requires_relogin':updates_extension,
-            'requires_files_reload':not cli_only and not extension_only,
-            'restart_backend':not extension_only and status.get('running',False),
+            'requires_files_reload':not (cli_only or extension_only or picker_only),
+            'restart_backend':not (extension_only or picker_only) and status.get('running',False),
+            'picker_available_now':updates_extension,
             'extension_version':json.loads((Path(__file__).parent/UUID/'metadata.json').read_text())['version']}
 for index,(source,target,mode) in enumerate(plan):
     assert not target.is_symlink(), target
