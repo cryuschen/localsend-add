@@ -23,11 +23,11 @@ export class RingPanel {
             y_align: Clutter.ActorAlign.CENTER, accessible_name: 'LocalSend：启动后台'});
         this.drawing = new St.DrawingArea({style_class: 'ls-ring-drawing', y_align: Clutter.ActorAlign.CENTER});
         this.drawing.connect('repaint', area => this.paint(area)); this.ring.set_child(this.drawing);
-        this.ring.connect('clicked', (_actor, button) => button === 3 ? this.showMenu(true) : this.activate());
+        this.ring.connect('clicked', (_actor, button) => button === 3 ? this.showMenu() : this.activate());
         this.ring.connect('key-press-event', (_actor, event) => {
             if (event.get_key_symbol() === Clutter.KEY_Menu
                 || event.get_key_symbol() === Clutter.KEY_F10 && event.get_state() & Clutter.ModifierType.SHIFT_MASK) {
-                this.showMenu(true); return Clutter.EVENT_STOP;
+                this.showMenu(); return Clutter.EVENT_STOP;
             }
             return Clutter.EVENT_PROPAGATE;
         });
@@ -39,7 +39,7 @@ export class RingPanel {
             button.connect('clicked', () => extension.answer(this.motion.pending?.id, accept)); this.decision.add_child(button);
         }
         this.row.add_child(this.decision); this.indicator.add_child(this.row);
-        this.indicator.setMenu(new PopupMenu.PopupMenu(this.ring, 0, St.Side.TOP));
+        this.indicator.setMenu(new PopupMenu.PopupMenu(this.ring, 0.5, St.Side.TOP));
         this.indicator._clickGesture.set_enabled(false);
         Main.panel.addToStatusArea('localsend-transfer', this.indicator, -1, 'left');
         this.settings = St.Settings.get();
@@ -49,42 +49,56 @@ export class RingPanel {
         this.motion.ingest(snapshot, lifecycle, time, wall);
         this.decision.visible = Boolean(this.motion.pending); this.peer.text = this.motion.pending?.alias ?? '';
         for (const child of this.decision.get_children().slice(1)) child.reactive = !this.extension.answering;
-        if (this.menuMode === 'send' && this.motion.phase !== 'idle') this.indicator.menu.close();
         this.tick(); this.extension.layout();
     }
     activate() {
+        // Refresh the deadline before acting, even if a delayed repaint timer
+        // has not yet removed an expired success state.
+        this.tick();
         const phase = this.motion.phase;
         if (phase === 'off') this.extension.start();
-        else if (phase === 'idle' && !this.motion.pending) this.showMenu(false);
+        else if (phase === 'idle' && !this.motion.pending) {
+            this.indicator.menu.close();
+            this.extension.chooseFiles();
+        }
         else if (phase === 'transfer') this.extension.cancel(this.motion.current);
         else if (phase === 'error') { this.motion.restore(nowMs()); this.tick(); }
+        else if (phase === 'success') {
+            const transfer = this.motion.current;
+            const path = transfer?.paths?.[0];
+            if (transfer?.direction === 'receive' && transfer.canOpen
+                && typeof path === 'string' && GLib.path_is_absolute(path)) this.extension.launch(path);
+        }
     }
-    showMenu(context) {
-        if (!context && (this.motion.phase !== 'idle' || this.motion.pending)) return;
-        this.menuMode = context ? 'exit' : 'send'; this.indicator.menu.removeAll();
-        const item = new PopupMenu.PopupMenuItem(context ? '退出' : '发送');
-        item.setSensitive(context ? this.motion.online && !this.extension.stopping : !this.extension.picker);
-        item.connect('activate', () => context ? this.extension.stop() : this.extension.chooseFiles());
+    showMenu() {
+        this.indicator.menu.removeAll();
+        const item = new PopupMenu.PopupMenuItem('退出');
+        item.setSensitive(this.motion.online && !this.extension.stopping);
+        item.connect('activate', () => this.extension.stop());
         this.indicator.menu.addMenuItem(item); this.indicator.menu.open();
     }
     tick() {
         removeSource(this.animationTimer); this.animationTimer = 0;
         this.frame = this.motion.sample(nowMs(), this.settings.enable_animations);
-        const names = {off: '启动后台', idle: '发送文件，右键退出', starting: '后台正在启动', stopping: '后台正在退出',
+        const names = {off: '启动后台', idle: '选择文件并发送，右键退出', starting: '后台正在启动', stopping: '后台正在退出',
             transfer: '取消本次传输', error: '传输失败或取消，单击恢复绿色', success: '传输成功', restoring: '正在恢复绿色'};
-        this.ring.accessible_name = `LocalSend：${names[this.frame.phase]}`; this.drawing.queue_repaint();
+        const canOpen = this.frame.phase === 'success' && this.motion.current?.canOpen;
+        this.ring.accessible_name = `LocalSend：${canOpen ? '打开本批第一个接收文件' : names[this.frame.phase]}`;
+        this.drawing.queue_repaint();
         if (this.frame.next !== null) this.animationTimer = GLib.timeout_add(GLib.PRIORITY_DEFAULT,
             Math.max(1, Math.ceil(this.frame.next)), () => { this.animationTimer = 0; this.tick(); return GLib.SOURCE_REMOVE; });
     }
     paint(area) {
         const [width, height] = area.get_surface_size(); const context = area.get_context();
         const diameter = Math.min(width, height);
+        const lineWidth = diameter * 0.10;
+        const radius = diameter * 0.46 - lineWidth / 2;
         try {
-            context.setLineWidth(diameter * 0.08);
+            context.setLineWidth(lineWidth);
             for (const layer of this.frame?.layers ?? this.motion.layers()) {
                 if (layer.end <= 0) continue;
                 context.setSourceRGB(...COLORS[layer.color]); context.newPath();
-                context.arc(width / 2, height / 2, diameter * 0.42, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * Math.min(1, layer.end));
+                context.arc(width / 2, height / 2, radius, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * Math.min(1, layer.end));
                 if (layer.end >= 1) context.closePath(); // Closed full strokes avoid a seam.
                 context.stroke();
             }
@@ -242,6 +256,13 @@ export default class LocalSendRing extends Extension {
                 try { source.wait_finish(result); } catch (_) { /* Selector was closed. */ } this.picker = null;
             });
         } catch (error) { Main.notifyError('LocalSend', error.message); }
+    }
+    launch(path) {
+        Gio.AppInfo.launch_default_for_uri_async(Gio.File.new_for_path(path).get_uri(),
+            global.create_app_launch_context(0, -1), null, (_source, result) => {
+                try { Gio.AppInfo.launch_default_for_uri_finish(result); }
+                catch (error) { if (this.enabled) Main.notifyError('LocalSend', error.message); }
+            });
     }
     disable() {
         this.enabled = false; this.generation++; removeSource(this.timer); this.timer = 0;

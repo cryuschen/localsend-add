@@ -1,7 +1,7 @@
 import {selectTransfer} from './model.mjs';
 
 export const COLORS = {white: [0.953, 0.953, 0.961], green: [0.392, 0.851, 0.545],
-    blue: [0.412, 0.667, 1], purple: [0.733, 0.541, 0.980], red: [0.949, 0.463, 0.498]};
+    blue: [0.412, 0.667, 1], purple: [154 / 255, 70 / 255, 1], red: [0.949, 0.463, 0.498]}; // Receive: #9A46FF.
 const clamp = value => Math.max(0, Math.min(1, value));
 const ease = value => value * value * (3 - 2 * value);
 const approach = elapsed => 0.88 * (1 - Math.exp(-Math.max(0, elapsed) / 1400));
