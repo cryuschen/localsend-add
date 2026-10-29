@@ -31,15 +31,66 @@ for (const direction of ['send','receive']) {
     const r = new Ring();
     const s = transfer => ({ok:true,running:true,pid:42,[direction]:transfer});
     r.ingest(s(t({id:direction,phase:'success',remaining_ms:5000})), null, 0);
-    check(r.phase === 'success' && r.fraction === 1, `${direction} success is full`);
+    check(r.phase === 'success' && r.fraction === 0, `${direction} unseen small success starts from green`);
     check(r.color === (direction==='send'?'blue':'purple'), `${direction} success retains its direction color`);
+    check(r.sample(0).next === 16, 'successful small transfer schedules animation frames');
+    check(r.sample(300).fraction === .5, 'small success sweeps clockwise instead of jumping full');
+    r.ingest(s(t({id:direction,phase:'success',remaining_ms:4700})), null, 300);
+    check(r.fraction === .5 && r.deadline === 5000, 'repeated success poll preserves the sweep and original deadline');
+    r.ingest(s(null), null, 400);
+    check(r.phase === 'success' && r.fraction > .5 && r.fraction < 1, 'result animation continues without another transfer snapshot');
+    check(r.sample(600).fraction === 1 && r.sample(600).next === 4400, 'success fills in 600 ms then sleeps until expiry');
+    r.ingest(s(t({id:direction,phase:'success',remaining_ms:4300})), null, 700);
+    check(r.fraction === 1 && r.progress === null, 'completed sweep never restarts on polling');
     check(r.sample(4999).phase === 'success', 'full five-second hold');
-    check(r.sample(5000).phase === 'restoring', 'automatic restore starts at deadline');
+    r.ingest(s(t({id:direction,phase:'success',remaining_ms:1})), null, 5000);
+    check(r.phase === 'restoring', 'late success poll cannot resurrect an expired result');
     check(r.sample(5700).phase === 'idle', 'automatic restore ends green');
     r.ingest(s(t({id:'error',phase:'failed',bytes:20,remaining_ms:5000})), null, 6000);
     check(r.color === 'red' && r.fraction === .2, 'failure freezes the reported fraction');
     check(r.sample(11000).phase === 'restoring', 'failure automatically restores after five seconds');
     check(r.sample(11700).phase === 'idle', 'failure leaves the backend running');
+
+    const partial = new Ring();
+    partial.ingest(s(t({bytes:40})), null, 0);
+    const visible = partial.sample(80).fraction;
+    partial.ingest(s(t({phase:'success',remaining_ms:5000})), null, 80);
+    check(partial.fraction === visible && visible === .2, 'success continues from the rendered partial arc');
+    check(partial.sample(380).fraction > visible && partial.sample(380).fraction < 1, 'partial result smoothly completes the remaining arc');
+    check(partial.sample(680).fraction === 1, 'partial success reaches full without resetting to zero');
+
+    const full = new Ring();
+    full.ingest(s(t({bytes:100})), null, 0); full.sample(160);
+    full.ingest(s(t({phase:'success',remaining_ms:5000})), null, 200);
+    check(full.fraction === 1 && full.progress === null, 'already rendered full progress stays full on success');
+
+    const reducedSuccess = new Ring();
+    reducedSuccess.ingest(s(t({phase:'success',remaining_ms:5000})), null, 0);
+    check(reducedSuccess.sample(100,false).fraction === 1, 'reduced motion shows successful small transfers immediately');
+    reducedSuccess.ingest(s(t({phase:'success',remaining_ms:4800})), null, 200);
+    check(reducedSuccess.fraction === 1 && reducedSuccess.sample(200,false).next === 4800,
+        'polling never rewinds reduced-motion success or starts a frame loop');
+
+    const expiring = new Ring();
+    expiring.ingest(s(t({phase:'success',remaining_ms:200})), null, 0);
+    const shortArc = expiring.sample(100).fraction;
+    expiring.sample(200);
+    check(expiring.phase === 'restoring' && expiring.fraction >= shortArc && expiring.fraction < 1,
+        'nearly expired result starts recovery on time even during completion animation');
+    check(expiring.sample(900).phase === 'idle', 'short-lived success still recovers normally');
+
+    const replaced = new Ring();
+    replaced.ingest(s(t({phase:'success',remaining_ms:5000})), null, 0); replaced.sample(200);
+    replaced.ingest(s(t({id:'next',bytes:30})), null, 200);
+    check(replaced.phase === 'transfer' && replaced.fraction === 0, 'new transfer replaces the finishing success animation');
+    check(replaced.sample(360).fraction === .3, 'new transfer still follows its own actual bytes');
+
+    const stopped = new Ring();
+    stopped.ingest(s(t({phase:'success',remaining_ms:5000})), null, 0); stopped.sample(300);
+    stopped.beginLifecycle('stopping',300); stopped.ingest(null,null,400);
+    check(stopped.phase === 'stopping' && stopped.sample(400).layers.at(-1).end === .5,
+        'shutdown preserves the visible success arc and clears its animation');
+    check(stopped.sample(2300).phase === 'off', 'shutdown during completion still ends white');
 }
 const slow = new Ring();
 slow.beginLifecycle('starting', 0);

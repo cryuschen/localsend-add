@@ -1,10 +1,12 @@
 import {selectTransfer} from './model.mjs';
 
 export const COLORS = {white: [0.953, 0.953, 0.961], green: [0.392, 0.851, 0.545],
-    blue: [0.412, 0.667, 1], purple: [154 / 255, 70 / 255, 1], red: [0.949, 0.463, 0.498]}; // Receive: #9A46FF.
+    blue: [59 / 255, 111 / 255, 1], purple: [154 / 255, 70 / 255, 1], red: [0.949, 0.463, 0.498]}; // Send: #3B6FFF; receive: #9A46FF.
 const clamp = value => Math.max(0, Math.min(1, value));
 const ease = value => value * value * (3 - 2 * value);
 const approach = elapsed => 0.88 * (1 - Math.exp(-Math.max(0, elapsed) / 1400));
+const PROGRESS_MS = 160;
+const COMPLETION_MS = 600;
 
 // Monotonic animation clocks; wall time is used only to translate the daemon's
 // cross-process lifecycle timestamps when a new record arrives.
@@ -89,23 +91,34 @@ export class Ring {
         if (this.phase === 'stopping') return;
         if (transfer && transfer.phase !== 'pending') {
             const key = `${transfer.direction}:${transfer.id}`;
+            this.sample(now);
             if (key !== this.dismissed) {
                 const fresh = key !== this.current?.key;
                 const terminal = transfer.phase !== 'running';
                 const changedPhase = fresh || transfer.phase !== this.current?.phase;
-                this.sample(now);
                 this.current = {...transfer, key};
                 this.color = transfer.isError ? 'red' : transfer.direction === 'send' ? 'blue' : 'purple';
                 if (terminal) {
                     this.phase = transfer.isError ? 'error' : 'success';
-                    this.fraction = transfer.fraction; this.progress = null; this.transition = null;
+                    this.transition = null;
+                    if (transfer.isError) {
+                        this.fraction = transfer.fraction; this.progress = null;
+                    } else if (changedPhase) {
+                        // A small transfer may finish between polls. Animate the
+                        // confirmed result from the visible arc, even if no
+                        // running snapshot arrived; keep success actions live.
+                        const from = fresh ? 0 : Math.min(this.fraction, transfer.fraction);
+                        this.fraction = from;
+                        this.progress = from < transfer.fraction
+                            ? {start: now, from, to: transfer.fraction, duration: COMPLETION_MS} : null;
+                    }
                     const expiry = now + Math.max(0, transfer.remaining_ms ?? 5000);
                     this.deadline = changedPhase || this.deadline === null ? expiry : Math.min(this.deadline, expiry);
                 } else {
                     const from = fresh ? 0 : Math.min(this.fraction, transfer.fraction);
                     const changed = fresh || this.progress?.to !== transfer.fraction;
                     this.phase = 'transfer'; this.deadline = null; this.transition = null;
-                    if (changed) this.progress = {start: now, from, to: transfer.fraction};
+                    if (changed) this.progress = {start: now, from, to: transfer.fraction, duration: PROGRESS_MS};
                 }
             }
         } else if ((this.phase === 'error' || this.phase === 'success') && now >= this.deadline) {
@@ -141,16 +154,19 @@ export class Ring {
             const amount = animations ? clamp((now - this.transition.start) / 700) : 1;
             this.fraction = this.transition.from * (1 - ease(amount));
             if (amount >= 1) { this.phase = this.online ? 'idle' : 'off'; this.fraction = 0; this.transition = null; }
-        } else if (this.phase === 'transfer' && this.progress) {
+        } else if (['transfer', 'success'].includes(this.phase) && this.progress) {
             const t = this.progress;
-            const amount = animations ? clamp((now - t.start) / 160) : 1;
+            const amount = animations ? clamp((now - t.start) / t.duration) : 1;
             this.fraction = Math.min(t.to, t.from + (t.to - t.from) * ease(amount));
-        } else if (['error', 'success'].includes(this.phase) && now >= this.deadline) {
+            if (this.phase === 'success' && amount >= 1) this.progress = null;
+        }
+        if (['error', 'success'].includes(this.phase) && now >= this.deadline) {
             this.restore(now);
         }
         let next = null;
         if (['starting', 'stopping', 'restoring'].includes(this.phase)
-            || this.phase === 'transfer' && this.progress && now < this.progress.start + 160) next = 16;
+            || ['transfer', 'success'].includes(this.phase) && this.progress
+                && now < this.progress.start + this.progress.duration) next = 16;
         else if (['error', 'success'].includes(this.phase)) next = Math.max(1, this.deadline - now);
         return {phase: this.phase, fraction: this.fraction, layers: this.layers(), next};
     }

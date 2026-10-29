@@ -86,12 +86,26 @@ export async function run() {
     check(opened.length===0,'pending, transfer, cancellation and error clicks never open files');
     const paths=['/tmp/z-首先收到 (2).txt','/tmp/a-后来收到.txt'];
     for(const direction of ['receive','send']) {
-        e.render(s({...t,id:'success-'+direction,phase:'success',remaining_ms:5000,paths,file_count:2},direction));
+        const result={...t,id:'success-'+direction,phase:'success',remaining_ms:5000,paths,file_count:2};
+        e.render(s(result,direction));
+        check(panel.motion.phase==='success'&&panel.frame.fraction<.02&&panel.animationTimer,
+            direction+' small success starts animated from green even without a running snapshot');
+        await pause(180);
+        check(panel.frame.fraction>.02&&panel.frame.fraction<1,
+            direction+' actual frame timer draws a partial clockwise success arc');
+        await capture('ring-'+direction+'-small-midway');
+        const visible=panel.frame.fraction;
+        e.render(s({...result,remaining_ms:4800},direction));
+        check(panel.frame.fraction>=visible&&panel.frame.fraction<1,
+            direction+' repeated successful poll preserves the visible completion arc');
         const before=requests.length; await click(panel.ring);
         check(panel.motion.phase==='success'&&requests.length===before,'success click does not alter transfer or result deadline');
         check(opened.length===1&&opened[0]===paths[0],direction==='receive'
             ?'receive success opens only the first final saved path':'send success does not open any files');
         check(!panel.open,'no additional open button');
+        await pause(650);
+        check(panel.frame.fraction===1&&panel.motion.phase==='success'&&panel.frame.next>1000,
+            direction+' completion reaches full color then stops the frame loop during the hold');
         await capture('ring-'+direction+'-success');
     }
     e.render(s({...t,id:'missing-path',phase:'success',remaining_ms:5000,paths:[]}));
