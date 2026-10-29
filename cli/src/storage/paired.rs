@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 /// its certificate fingerprint; certificates (RSA) then become ephemeral.
 const PAIRED_DEVICES_VERSION: u32 = 1;
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct PairedDevice {
     pub alias: String,
 
@@ -120,18 +120,29 @@ impl PairedDevices {
         self.file.devices.contains_key(fingerprint)
     }
 
-    /// Adds a device and saves the file. The device stays paired for this
-    /// run even when saving fails.
+    /// Adds a device, committing the in-memory change only if saving succeeds.
     pub fn insert(
         &mut self,
         fingerprint: String,
         alias: String,
         channels: Vec<PairedChannel>,
     ) -> anyhow::Result<()> {
-        self.file
+        let previous = self
+            .file
             .devices
-            .insert(fingerprint, PairedDevice { alias, channels });
-        self.save()
+            .insert(fingerprint.clone(), PairedDevice { alias, channels });
+        if let Err(error) = self.save() {
+            match previous {
+                Some(device) => {
+                    self.file.devices.insert(fingerprint, device);
+                }
+                None => {
+                    self.file.devices.remove(&fingerprint);
+                }
+            }
+            return Err(error);
+        }
+        Ok(())
     }
 
     /// Refreshes a paired device's alias and channels after a confirmation,
@@ -153,11 +164,16 @@ impl PairedDevices {
         self.save()
     }
 
-    /// Removes a device and saves the file. The device stays removed for
-    /// this run even when saving fails.
+    /// Removes a device, restoring the in-memory entry if saving fails.
     pub fn remove(&mut self, fingerprint: &str) -> anyhow::Result<Option<PairedDevice>> {
         match self.file.devices.remove(fingerprint) {
-            Some(device) => self.save().map(|()| Some(device)),
+            Some(device) => match self.save() {
+                Ok(()) => Ok(Some(device)),
+                Err(error) => {
+                    self.file.devices.insert(fingerprint.to_string(), device);
+                    Err(error)
+                }
+            },
             None => Ok(None),
         }
     }
@@ -209,6 +225,23 @@ mod tests {
             port: 53317,
             protocol: ProtocolType::Https,
         }
+    }
+
+    #[test]
+    fn failed_pair_and_unpair_do_not_change_the_active_whitelist() {
+        let dir = temp_dir("failed-management");
+        let mut paired = PairedDevices::load(&dir).unwrap();
+        let temp = dir.join("paired-v2.json.tmp");
+        std::fs::create_dir(&temp).unwrap();
+        assert!(paired.insert("FP".into(), "Phone".into(), vec![]).is_err());
+        assert!(!paired.contains("FP"));
+        std::fs::remove_dir(&temp).unwrap();
+        paired.insert("FP".into(), "Phone".into(), vec![]).unwrap();
+        std::fs::create_dir(&temp).unwrap();
+        assert!(paired.remove("FP").is_err());
+        assert!(paired.contains("FP"));
+        assert!(PairedDevices::load(&dir).unwrap().contains("FP"));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

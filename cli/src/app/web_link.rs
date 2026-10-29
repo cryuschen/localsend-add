@@ -142,7 +142,7 @@ impl App {
     }
 
     /// The plain-HTTP links of the running server, one per line.
-    fn web_links(&self) -> String {
+    pub(super) fn web_links(&self) -> String {
         match crate::banner::listening_lines(&self.server.local_addresses(), "http") {
             lines if lines.is_empty() => " - (no network interface found)".to_string(),
             lines => lines.join("\n"),
@@ -155,14 +155,14 @@ impl App {
     /// Only the modules are drawn, in the terminal's foreground color; the
     /// rest stays the plain background. On dark terminals that inverts the
     /// code (light on dark), which phone scanners accept.
-    fn web_qr(&self) -> Option<String> {
+    pub(super) fn web_qr(&self) -> Option<String> {
         let address = self.server.local_addresses().into_iter().next()?;
         let code =
             QrCode::with_error_correction_level(format!("http://{address}"), EcLevel::L).ok()?;
         Some(code.render::<unicode::Dense1x2>().quiet_zone(false).build())
     }
 
-    async fn disable_web(&mut self, category: Category, feature: &str) {
+    pub(super) async fn disable_web(&mut self, category: Category, feature: &str) {
         self.web = None;
         match self.restart_server(CoreWebMode::Disabled).await {
             Ok(()) => self.ui.log(

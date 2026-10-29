@@ -39,6 +39,7 @@ impl Category {
 ///
 /// The terminal is in raw mode, so every line break must be `\r\n`.
 pub struct Ui {
+    plain: bool,
     out: Stdout,
     status: Option<String>,
 
@@ -51,10 +52,19 @@ pub struct Ui {
 impl Ui {
     pub fn new() -> Self {
         Self {
+            plain: false,
             out: stdout(),
             status: None,
             suspended: false,
             buffer: Vec::new(),
+        }
+    }
+
+    /// Background logs have no terminal cursor or progress redraws.
+    pub fn plain() -> Self {
+        Self {
+            plain: true,
+            ..Self::new()
         }
     }
 
@@ -87,6 +97,12 @@ impl Ui {
     }
 
     fn print_block(&mut self, category: Option<Category>, text: &str) {
+        if self.plain {
+            let tag = category.map(|c| c.tag()).unwrap_or("-");
+            let _ = writeln!(self.out, "[{tag}] {}", crate::sanitize::multi_line(text));
+            let _ = self.out.flush();
+            return;
+        }
         self.clear_status_line();
         for (i, line) in text.lines().enumerate() {
             let formatted = match (i, category) {
@@ -108,6 +124,9 @@ impl Ui {
 
     /// Replaces the status line at the bottom, or removes it with `None`.
     pub fn set_status(&mut self, status: Option<String>) {
+        if self.plain {
+            return;
+        }
         if status == self.status {
             return;
         }

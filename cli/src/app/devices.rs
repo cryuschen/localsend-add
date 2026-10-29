@@ -125,7 +125,7 @@ impl App {
             ),
             Err(err) => self.ui.log(
                 Category::Discovery,
-                &format!("{alias}: Paired for this run, but saving failed: {err:#}"),
+                &format!("{alias}: Could not save pairing: {err:#}"),
             ),
         }
         let rows = self.device_rows();
@@ -150,7 +150,7 @@ impl App {
             Err(err) => {
                 self.ui.log(
                     Category::Discovery,
-                    &format!("Unpaired for this run, but saving failed: {err:#}"),
+                    &format!("Could not remove pairing: {err:#}"),
                 );
             }
         }

@@ -1,0 +1,7 @@
+{
+  "uuid": "localsend-transfer@local",
+  "name": "LocalSend 收发进度",
+  "description": "在顶栏显示 LocalSend CLI 收发进度、接收确认与文件操作；结束五秒后隐藏。",
+  "shell-version": ["50"],
+  "version": 6
+}

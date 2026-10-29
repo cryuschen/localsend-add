@@ -62,8 +62,14 @@ pub async fn run_send(
     cancel: SendCancel,
     events: mpsc::Sender<AppEvent>,
 ) {
+    let token = cancel.token.clone();
     let success = send_inner(identity, device, files, sources, progress, cancel, &events).await;
-    let _ = events.send(AppEvent::SendEnded { success }).await;
+    let _ = events
+        .send(AppEvent::SendEnded {
+            success,
+            cancelled: token.is_cancelled(),
+        })
+        .await;
 }
 
 async fn send_inner(

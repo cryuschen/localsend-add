@@ -1,0 +1,38 @@
+# LocalSend 顶栏收发进度
+
+面向本机 GNOME Shell 50 的用户扩展 `localsend-transfer@local`。风扇转速组件（Vitals）右侧只有一条可复用传输栏：发送或接收时切换对应状态，始终保持一行，空闲时隐藏。设备名完整显示，不限固定宽度、不使用省略号；文字与其他顶栏文字的字体、字号和垂直位置一致。
+
+- 非白名单设备：显示设备名、“接收”“拒绝”；接收只允许本次，不添加白名单；拒绝立即隐藏。收到请求后 4 秒无人处理，后台自动拒绝并立即隐藏顶栏；轮询不会延长期限。
+- 同一批无论有一个还是多个文件，始终只有一条传输栏；保持一次接收一台设备。
+- 传输中：仅显示对方设备名和从左向右填充的蓝色进度条；传输中、失败或取消均不显示“打开”，发送也不显示“打开”。传输中不显示状态文字或百分比，字体、字号及缩放继承系统顶栏。
+- 成功：进度条填满并变绿；发送成功时在进度右侧显示“传输成功”，接收成功后才显示并启用“打开”。打开文件使用最终保存路径，重名文件不会误开旧文件。多个文件时，顶栏打开该批最先开始接收的文件，不按文件名或完成先后重新排序；点击设备名可在详情菜单选择其他文件。
+- 文本消息：与文件使用同样的白名单和 4 秒接收/拒绝规则。接受后在接收目录保存为 UTF-8 的 `LocalSend-文本.txt`，重名自动递增、不覆盖；保存成功才确认消息并显示“打开”。点击使用系统默认文本编辑器（本机为 GNOME 文本编辑器），保留原始换行及内容，不自动弹出编辑器。
+- 失败/取消：进度停留在最后累计位置，填充部分变红；零进度时轨道呈浅红色。每个文件保留累计进度，重试不重复计数；点击设备名查看详细原因。
+- 成功、失败、取消均从实际结束时刻开始计时，五秒后隐藏。新任务会替换上一任务的短暂结果，不重新弹出旧结果。
+- 点击设备名可展开设备、保存位置和文件列表。接收文件夹仍沿用上游 CLI 的平铺保存规则。
+
+CLI 和 Nautilus 菜单不再调用 `notify-send`。扩展只异步读取权限为 0600 的本机 Unix 套接字；空闲每秒一次，有任务每 200 毫秒一次。不启动 CLI，也不触发设备公告、扫描或测活。CLI 仍使用原来的按需启动方式。
+
+## 安装
+
+编译 `cargo build --release --locked --offline --package localsend-cli --jobs 2`，将二进制安装为 `~/.local/bin/localsend-cli`，扩展目录安装为 `~/.local/share/gnome-shell/extensions/localsend-transfer@local`，菜单文件安装为 `~/.local/share/nautilus-python/extensions/localsend_menu.py`。设置 `org.gnome.shell enabled-extensions` 时保留现有项目。
+
+GNOME 50 当前会话不能通过已废弃的 ReloadExtension 接口加载新扩展。首次安装后需要保存工作、退出登录并重新登录；普通锁屏不能替代。不要为加载扩展强制重启 Wayland Shell。登录后原有 `localsend` 命令及文件管理器菜单照常按需启动 CLI。
+
+仅更新顶栏样式可执行 `python3 support/gnome/install_panel.py --extension-only`；不替换或重启 CLI。新扩展代码仍需重新登录加载。
+
+## 后台启动信息
+
+`localsend` 与 `localsend start` 显示和终端模式同款的 Logo、彩色标题及中文状态：设备名、PID、后台运行时长、端口、接收目录、配置和日志路径、白名单数量、当前收发/待确认/排队状态、发现模式和监听地址。输出是启动时的快照，命令随后返回，后台继续运行；再次执行复用同一个后台，不重启进程。重定向输出和设置 `NO_COLOR` 时去掉颜色控制符。
+
+脚本读取启动状态请使用 `localsend start --json`；`localsend status --json` 和本机控制接口保持 JSON。启动信息只读本机状态，不额外扫描或测活。仅更新后台与右键菜单可运行 `python3 support/gnome/install_panel.py --backend-menu`；需重开文件管理器，不涉及顶栏重新登录。仅更新 CLI 可运行 `python3 support/gnome/install_panel.py --cli-only`，备份并保留配置/白名单，不改 GNOME 扩展，无需重新登录。仍在运行的 `localsend terminal` 要先自行退出，再启动后台。
+
+## 验证
+
+- `cargo test --locked --offline --package localsend-cli --jobs 2`
+- `gjs -m support/gnome/test_model.mjs`
+- `check_shell.mjs`：在独立无界面 GNOME 50 测试会话中检查实际 St 控件、截图、双向布局和按钮；仅用于测试，不在当前用户会话执行。
+
+安装前版本、文件校验和及回退位置记入 `development-setup/panel-install.json`。禁用扩展：`gnome-extensions disable localsend-transfer@local`。`rollback_panel.py` 恢复最近一次安装前的版本与本扩展原来的启用状态，不改其他扩展。最初的旧系统通知版本仍保存在首次安装备份中；仅禁用顶栏不会恢复旧通知。
+
+原隔离传输测试脚本 `check_transfers.py` 已按用户要求删除；日常收发与通知功能不依赖它。已有验证结果保留在开发记录中。

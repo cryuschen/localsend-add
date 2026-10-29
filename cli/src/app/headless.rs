@@ -86,7 +86,7 @@ pub(super) async fn run(
                     send.total_bytes = accepted_bytes;
                 }
             }
-            AppEvent::SendEnded { success } => {
+            AppEvent::SendEnded { success, .. } => {
                 break match success {
                     true => Ok(()),
                     false => Err(anyhow::anyhow!("Transfer failed")),
@@ -94,7 +94,10 @@ pub(super) async fn run(
             }
             // No keyboard, no accepted receive sessions and no web links in
             // this mode.
-            AppEvent::Key(_) | AppEvent::ReceiveFileResult { .. } | AppEvent::Web(_) => {}
+            AppEvent::Key(_)
+            | AppEvent::ReceiveFileResult { .. }
+            | AppEvent::ReceiveMessageResult { .. }
+            | AppEvent::Web(_) => {}
         }
     };
     ui.set_status(None);

@@ -22,3 +22,54 @@
 
 # Generated at build time by makepri (see support/scripts/compile_windows_msix_helper.ps1)
 /support/build/msix/content/resources.pri
+
+# Local Python tooling and test caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.venv/
+venv/
+
+# Local build output and dependency caches (keep lockfiles and packaging sources)
+target/
+/build/
+/dist/
+.pub-cache/
+.pub/
+node_modules/
+
+# Machine-specific development records, backups and editor recovery files
+/development-setup/
+/backups/
+*.log
+*.bak
+*.old
+*.orig
+*~
+
+# Credentials, device identities and runtime state
+.env
+.env.*
+!.env.example
+!.env.template
+*.pem
+identity.pem*
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+paired-v*.json*
+/config.toml
+/.config/localsend-cli/
+/.local/state/localsend-cli/
+control.sock
+*.pid
+.aws/
+.codex/
+.agents/

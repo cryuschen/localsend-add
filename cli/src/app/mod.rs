@@ -1,7 +1,10 @@
+#[cfg(unix)]
+pub(crate) mod background;
 mod devices;
 mod discovery;
 mod headless;
 mod keys;
+mod progress;
 mod receive;
 mod sending;
 mod status;
@@ -58,6 +61,14 @@ pub enum AppEvent {
         result: Result<(), String>,
     },
 
+    /// An inline text message has been saved locally before acknowledging it.
+    ReceiveMessageResult {
+        session_id: String,
+        file_id: String,
+        decision_tx: oneshot::Sender<localsend::http::server::v2::PrepareUploadDecisionV2>,
+        result: Result<PathBuf, String>,
+    },
+
     /// The send task created its upload session.
     SendSessionStarted {
         session_id: String,
@@ -65,7 +76,7 @@ pub enum AppEvent {
     },
 
     /// The send task ended.
-    SendEnded { success: bool },
+    SendEnded { success: bool, cancelled: bool },
 
     /// The staged startup discovery finished.
     DiscoveryFinished,
@@ -86,7 +97,8 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
                 to.as_deref().map(TargetSelector::parse).transpose()?,
             )
         }
-        None => (Payload::Files(Vec::new()), None),
+        None | Some(Command::Terminal) => (Payload::Files(args.files.clone()), None),
+        _ => anyhow::bail!("Background control is supported on Unix platforms only"),
     };
     if let Payload::Files(paths) = &payload {
         for path in paths {
@@ -270,6 +282,7 @@ struct App {
 
     pending: Option<PendingReceive>,
     receive: Option<ReceiveSession>,
+    last_receive: Option<progress::Transfer>,
     send: Option<SendState>,
     overlay: Overlay,
 
@@ -342,6 +355,7 @@ async fn run_interactive(
         storage,
         pending: None,
         receive: None,
+        last_receive: None,
         send: None,
         overlay: Overlay::None,
         preselected,
@@ -403,6 +417,12 @@ impl App {
                 file_id,
                 result,
             } => self.receive_file_result(session_id, file_id, result),
+            AppEvent::ReceiveMessageResult {
+                session_id,
+                file_id,
+                decision_tx,
+                result,
+            } => self.receive_message_result(session_id, file_id, decision_tx, result),
             AppEvent::SendSessionStarted {
                 session_id,
                 accepted_bytes,
@@ -412,7 +432,7 @@ impl App {
                     send.total_bytes = accepted_bytes;
                 }
             }
-            AppEvent::SendEnded { success } => {
+            AppEvent::SendEnded { success, .. } => {
                 self.send = None;
                 self.render_status();
                 if !success && !self.preselected.is_empty() {

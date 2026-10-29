@@ -63,7 +63,7 @@ impl Repository {
 /// `~/.config` is used on every platform instead of `dirs::config_dir()`:
 /// terminal tools conventionally keep their config there even on macOS, and
 /// the `-cli` suffix keeps the directory separate from the Flutter app's.
-fn dir() -> PathBuf {
+pub(crate) fn dir() -> PathBuf {
     std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         // The XDG spec says to ignore relative paths.
