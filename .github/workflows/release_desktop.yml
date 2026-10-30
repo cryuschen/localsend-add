@@ -64,7 +64,7 @@ jobs:
         run: python3 support/desktop/package.py --tag "$DESKTOP_TAG"
       - name: Verify extracted package in a temporary home
         run: python3 support/desktop/check_package.py release/*.tar.gz
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         with:
           name: desktop-preview-linux-x86_64
           path: |
