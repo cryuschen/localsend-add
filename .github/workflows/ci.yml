@@ -18,7 +18,7 @@ jobs:
     name: Desktop CLI, GTK and installer
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Install desktop test dependencies
         run: |
           sudo apt-get update
@@ -43,7 +43,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Setup Flutter SDK
         uses: flutter-actions/setup-flutter@v4
         with:
@@ -67,7 +67,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Setup Flutter SDK
         uses: flutter-actions/setup-flutter@v4
         with:
@@ -97,7 +97,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Setup Rust
         run: rustup toolchain install --profile minimal # version from rust-toolchain.toml
       - name: Cache
@@ -124,7 +124,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Extract version from pubspec.yaml
         id: pubspec_version
         run: |
