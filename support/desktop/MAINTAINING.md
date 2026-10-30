@@ -30,7 +30,7 @@ Release tag format: `v1.18.2-desktop.N`. The CLI's Cargo package version stays
 aligned with the upstream Flutter/Inno version as required by upstream CI;
 the desktop release tag and CLI `LOCAL_VERSION` distinguish fork revisions.
 
-The **Desktop preview release** workflow builds both binaries on Ubuntu 24.04,
+The **Desktop preview release** workflow builds both binaries on Ubuntu 26.04,
 runs desktop tests and packages the runtime assets. A matching tag push
 publishes a GitHub prerelease; manual workflow dispatch builds artifacts by
 default, with an explicit publish option. Review the resulting CI run before

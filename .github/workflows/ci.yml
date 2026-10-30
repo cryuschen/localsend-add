@@ -16,7 +16,7 @@ permissions:
 jobs:
   desktop:
     name: Desktop CLI, GTK and installer
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v6
       - name: Install desktop test dependencies

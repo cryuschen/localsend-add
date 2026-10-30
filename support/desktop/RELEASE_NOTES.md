@@ -1,7 +1,7 @@
 Unofficial LocalSend GNOME desktop preview, based on upstream LocalSend 1.18.2.
 
 **Desktop target:** Ubuntu 26.04, GNOME Shell 50, Nautilus 50, GTK >= 4.10.
-**Binary build platform:** Ubuntu 24.04, Linux x86_64; dynamically linked.
+**Binary build platform:** Ubuntu 26.04, Linux x86_64; dynamically linked.
 
 Includes the shared Rust backend, native GTK file/folder/text sender, GNOME
 status ring, Nautilus menu and user-local installer. CLI receive files are
