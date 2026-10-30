@@ -25,8 +25,10 @@ EXTENSION_FILES = ["extension.js", "metadata.json", "model.mjs", "ring.mjs", "rp
 
 
 def dependency_notices(destination, target):
+    # Metadata may need optional workspace sources that a binary build did not
+    # fetch. Keep resolution locked, but allow Cargo to populate a fresh cache.
     metadata = json.loads(subprocess.check_output([
-        "cargo", "metadata", "--locked", "--offline", "--format-version", "1", "--filter-platform", target
+        "cargo", "metadata", "--locked", "--format-version", "1", "--filter-platform", target
     ], cwd=ROOT, text=True))
     packages = {p["id"]: p for p in metadata["packages"]}
     nodes = {p["id"]: p for p in metadata["resolve"]["nodes"]}
