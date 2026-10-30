@@ -1,3 +1,4 @@
+// Modified by localsend-add contributors, 2026. See NOTICE and LICENSE.
 import {Ring} from './localsend-transfer@local/ring.mjs';
 let cases = 0;
 function check(ok, message) { if (!ok) throw new Error(message); cases++; }

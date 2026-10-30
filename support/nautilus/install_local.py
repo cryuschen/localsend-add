@@ -1,3 +1,4 @@
+# Modified by localsend-add contributors, 2026. See NOTICE and LICENSE.
 """Install a verified local build and the menu, retaining a recoverable backup."""
 
 from datetime import datetime

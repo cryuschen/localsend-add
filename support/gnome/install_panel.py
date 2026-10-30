@@ -1,3 +1,4 @@
+# Modified by localsend-add contributors, 2026. See NOTICE and LICENSE.
 """Install this local CLI and GNOME extension, preserving a narrow rollback."""
 from datetime import datetime
 from zoneinfo import ZoneInfo

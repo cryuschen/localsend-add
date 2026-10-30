@@ -1,3 +1,4 @@
+// Modified by localsend-add contributors, 2026. See NOTICE and LICENSE.
 //! Persistent networking without a terminal; started explicitly or by a menu request.
 
 use super::progress::{Phase, Transfer};

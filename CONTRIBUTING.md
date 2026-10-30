@@ -1,3 +1,5 @@
+> This repository is the unofficial LocalSend Add desktop derivative. For desktop development, tests and release scope see [the maintenance guide](support/desktop/MAINTAINING.md). Report fork-specific issues in this repository. The upstream contribution guidelines below are retained for upstream code and must be followed when submitting to the official project.
+
 # Contributing to LocalSend
 
 LocalSend is an open-source project, and we welcome contributions from anyone who is interested in helping improve the app. Whether you're a developer, a translator, or a documentation writer, there are many ways to get involved.

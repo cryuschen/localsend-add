@@ -1,3 +1,4 @@
+// Modified by localsend-add contributors, 2026. See NOTICE and LICENSE.
 use crate::storage::Repository;
 use crossterm::style::Stylize;
 use localsend::http::server::ServerHandle;

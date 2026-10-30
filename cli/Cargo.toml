@@ -1,7 +1,11 @@
+# Modified by localsend-add contributors, 2026. See NOTICE and LICENSE.
 [package]
 name = "localsend-cli"
 version = "1.18.2"
 edition = "2024"
+license = "Apache-2.0"
+publish = false
+repository = "https://github.com/cryuschen/localsend-add"
 
 [[bin]]
 name = "localsend-cli"

@@ -1,3 +1,4 @@
+# Modified by localsend-add contributors, 2026. See NOTICE and LICENSE.
 """Compatibility entry for Shell sessions loaded before the Rust picker update.
 
 Replaced in-place with the Rust process; no Python GTK UI or menu import remains.

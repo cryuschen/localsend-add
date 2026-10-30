@@ -1,3 +1,4 @@
+// Modified by localsend-add contributors, 2026. See NOTICE and LICENSE.
 mod app;
 mod banner;
 #[cfg(unix)]
@@ -14,7 +15,7 @@ mod util;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
-pub(crate) const LOCAL_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "-local-unified.4");
+pub(crate) const LOCAL_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "-local-unified.5");
 
 #[derive(Subcommand)]
 pub enum WebCommand {

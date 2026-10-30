@@ -1,3 +1,4 @@
+// Modified by localsend-add contributors, 2026. See NOTICE and LICENSE.
 use crate::app::AppEvent;
 use crate::sanitize;
 use crate::storage::Identity;

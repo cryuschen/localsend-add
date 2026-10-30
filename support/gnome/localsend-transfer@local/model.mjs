@@ -1,3 +1,4 @@
+// Modified by localsend-add contributors, 2026. See NOTICE and LICENSE.
 // Plain state projection, also exercised outside GNOME Shell.
 export function view(transfer, direction) {
     if (!transfer || (transfer.remaining_ms !== null && transfer.remaining_ms <= 0))

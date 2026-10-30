@@ -1,3 +1,4 @@
+// Modified by localsend-add contributors, 2026. See NOTICE and LICENSE.
 //! Same-user IPC only: discovery, confirmation policy and sending stay in the CLI.
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};

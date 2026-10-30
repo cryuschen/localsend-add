@@ -1,3 +1,4 @@
+// Modified by localsend-add contributors, 2026. See NOTICE and LICENSE.
 use crate::util;
 use crossterm::style::{Color, Print, Stylize};
 use crossterm::terminal::{Clear, ClearType};

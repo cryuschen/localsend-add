@@ -1,0 +1,81 @@
+# Modified by localsend-add contributors, 2026. See NOTICE and LICENSE.
+name: Desktop preview release
+
+on:
+  push:
+    tags: ['v*-desktop.*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Desktop preview tag (v1.18.2-desktop.N)
+        required: true
+        default: v1.18.2-desktop.1
+      publish:
+        description: Publish a GitHub prerelease after validation
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  desktop:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Resolve preview tag
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          EVENT_NAME: ${{ github.event_name }}
+          REF_TAG: ${{ github.ref_name }}
+        run: |
+          TAG="$INPUT_TAG"
+          if [ "$EVENT_NAME" = push ]; then TAG="$REF_TAG"; fi
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-desktop\.[0-9]+$ ]]; then
+            echo 'Invalid desktop preview tag'; exit 1
+          fi
+          echo "DESKTOP_TAG=$TAG" >> "$GITHUB_ENV"
+      - name: Install build and test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libssl-dev libgtk-4-dev libgtk-4-bin gjs python3-gi python3-nautilus gir1.2-nautilus-4.1 gir1.2-gtk-4.0 dbus-x11
+      - name: Setup pinned Rust
+        run: rustup toolchain install --profile minimal
+      - uses: Swatinem/rust-cache@v2
+      - name: Verify current content and fork history
+        run: python3 support/desktop/check_publication.py --history
+      - name: Core and desktop regressions
+        run: |
+          cargo test --locked -p localsend --features full --jobs 2
+          cargo test --locked -p localsend-cli -p localsend-picker --jobs 2
+          python3 -m unittest discover -s support/desktop -p 'test_*.py'
+          bash support/gnome/test_picker.sh
+          gjs -m support/gnome/test_ring.mjs
+          gjs -m support/gnome/test_model.mjs
+      - name: Build desktop binaries
+        run: cargo build --release --locked -p localsend-cli -p localsend-picker --jobs 2
+      - name: Real TLS receive publication and idle recovery
+        run: python3 support/desktop/check_receive.py target/release/localsend-cli --idle
+      - name: Package runtime and license texts
+        run: python3 support/desktop/package.py --tag "$DESKTOP_TAG"
+      - name: Verify extracted package in a temporary home
+        run: python3 support/desktop/check_package.py release/*.tar.gz
+      - uses: actions/upload-artifact@v6
+        with:
+          name: desktop-preview-linux-x86_64
+          path: |
+            release/*.tar.gz
+            release/SHA256SUMS
+          if-no-files-found: error
+      - name: Publish preview
+        if: github.event_name == 'push' || inputs.publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$DESKTOP_TAG" release/*.tar.gz release/SHA256SUMS \
+            --target "$GITHUB_SHA" --prerelease --title "LocalSend Add $DESKTOP_TAG (GNOME preview)" \
+            --notes-file support/desktop/RELEASE_NOTES.md

@@ -1,4 +1,5 @@
 #![cfg(feature = "http")]
+// Modified by localsend-add contributors, 2026. See NOTICE and LICENSE.
 
 use bytes::Bytes;
 use futures_util::StreamExt;
@@ -49,6 +50,16 @@ async fn start_test_server_with_verification(
     save_dir: Option<PathBuf>,
     verify_checksums: bool,
 ) -> TestServer {
+    start_test_server_with_target(pin, accept, save_dir, verify_checksums, false).await
+}
+
+async fn start_test_server_with_target(
+    pin: Option<String>,
+    accept: bool,
+    save_dir: Option<PathBuf>,
+    verify_checksums: bool,
+    atomic: bool,
+) -> TestServer {
     let _ = tracing_subscriber::fmt().with_test_writer().try_init();
     let received: Arc<Mutex<HashMap<String, Vec<u8>>>> = Arc::new(Mutex::new(HashMap::new()));
     let session_ends: Arc<Mutex<Vec<(String, SessionEndReasonV2)>>> =
@@ -98,11 +109,20 @@ async fn start_test_server_with_verification(
                             Some(dir) => {
                                 let path = dir.join(&file_id);
                                 let (result_tx, result_rx) = oneshot::channel();
-                                let _ = target_tx.send(FileUploadTarget::Path {
-                                    path: path.clone(),
-                                    result_tx,
-                                    progress_tx: None,
-                                });
+                                let target = if atomic {
+                                    FileUploadTarget::AtomicPath {
+                                        path: path.clone(),
+                                        result_tx,
+                                        progress_tx: None,
+                                    }
+                                } else {
+                                    FileUploadTarget::Path {
+                                        path: path.clone(),
+                                        result_tx,
+                                        progress_tx: None,
+                                    }
+                                };
+                                let _ = target_tx.send(target);
                                 tokio::spawn(async move {
                                     if let Ok(Ok(())) = result_rx.await {
                                         let bytes = tokio::fs::read(&path).await.unwrap();
@@ -1461,4 +1481,181 @@ async fn test_pin_too_many_attempts() {
         )
         .await;
     assert_status(result, 429);
+}
+
+// localsend-add regression checks: verified publication and no overwrite.
+#[tokio::test]
+async fn atomic_receive_removes_bad_checksum_and_allows_verified_retry() {
+    let dir = std::env::temp_dir().join(format!("localsend-atomic-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let server = start_test_server_with_target(None, true, Some(dir.clone()), true, true).await;
+    let client = LsHttpClientV2::try_new_without_cert().unwrap();
+    let mut file = file_dto("atomic.bin", "atomic.bin", 4);
+    file.sha256 = Some(sha256_hex(b"GOOD"));
+    let response = client
+        .prepare_upload(
+            ProtocolType::Http,
+            "127.0.0.1",
+            server.port,
+            None,
+            prepare_upload_request(&[file]),
+            None,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap()
+        .response
+        .unwrap();
+    let token = &response.files["atomic.bin"];
+    assert_status(
+        upload_bytes(
+            &client,
+            server.port,
+            &response.session_id,
+            "atomic.bin",
+            token,
+            b"BAD!",
+        )
+        .await,
+        422,
+    );
+    assert_eq!(
+        std::fs::read_dir(&dir).unwrap().count(),
+        0,
+        "failed data must not remain in the receive directory"
+    );
+    upload_bytes(
+        &client,
+        server.port,
+        &response.session_id,
+        "atomic.bin",
+        token,
+        b"GOOD",
+    )
+    .await
+    .unwrap();
+    assert_eq!(std::fs::read(dir.join("atomic.bin")).unwrap(), b"GOOD");
+    assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn atomic_receive_never_overwrites_a_concurrently_claimed_destination() {
+    let dir = std::env::temp_dir().join(format!("localsend-atomic-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let server = start_test_server_with_target(None, true, Some(dir.clone()), true, true).await;
+    let client = LsHttpClientV2::try_new_without_cert().unwrap();
+    let response = client
+        .prepare_upload(
+            ProtocolType::Http,
+            "127.0.0.1",
+            server.port,
+            None,
+            prepare_upload_request(&[file_dto("existing.bin", "existing.bin", 4)]),
+            None,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap()
+        .response
+        .unwrap();
+    std::fs::write(dir.join("existing.bin"), b"ORIGINAL").unwrap();
+    assert_status(
+        upload_bytes(
+            &client,
+            server.port,
+            &response.session_id,
+            "existing.bin",
+            &response.files["existing.bin"],
+            b"NEW!",
+        )
+        .await,
+        500,
+    );
+    assert_eq!(
+        std::fs::read(dir.join("existing.bin")).unwrap(),
+        b"ORIGINAL"
+    );
+    assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn atomic_receive_cancel_discards_partial_data_and_releases_the_session() {
+    let dir = std::env::temp_dir().join(format!("localsend-atomic-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let server = start_test_server_with_target(None, true, Some(dir.clone()), true, true).await;
+    let client = LsHttpClientV2::try_new_without_cert().unwrap();
+    let response = client
+        .prepare_upload(
+            ProtocolType::Http,
+            "127.0.0.1",
+            server.port,
+            None,
+            prepare_upload_request(&[file_dto("partial.bin", "partial.bin", 100)]),
+            None,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap()
+        .response
+        .unwrap();
+    let url = format!(
+        "http://127.0.0.1:{}/api/localsend/v2/upload?sessionId={}&fileId=partial.bin&token={}",
+        server.port, response.session_id, response.files["partial.bin"]
+    );
+    let (tx, rx) = mpsc::channel::<Bytes>(2);
+    tx.send(Bytes::from_static(b"part")).await.unwrap();
+    let upload = tokio::spawn(async move {
+        reqwest::Client::new()
+            .post(url)
+            .body(reqwest::Body::wrap_stream(
+                ReceiverStream::new(rx).map(Ok::<_, std::io::Error>),
+            ))
+            .send()
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while std::fs::read_dir(&dir).unwrap().count() == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(!dir.join("partial.bin").exists());
+    client
+        .cancel(
+            ProtocolType::Http,
+            "127.0.0.1",
+            server.port,
+            &response.session_id,
+        )
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(3), upload)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while std::fs::read_dir(&dir).unwrap().count() != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    drop(tx);
+    client
+        .prepare_upload(
+            ProtocolType::Http,
+            "127.0.0.1",
+            server.port,
+            None,
+            prepare_upload_request(&[file_dto("next.bin", "next.bin", 1)]),
+            None,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    std::fs::remove_dir_all(dir).unwrap();
 }

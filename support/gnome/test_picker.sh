@@ -1,4 +1,5 @@
 #!/bin/bash
+# Modified by localsend-add contributors, 2026. See NOTICE and LICENSE.
 # Isolated display and D-Bus; never inject test devices into the daily backend.
 set -eu
 picker_source=$(cd -- "$(dirname -- "$0")/../.." && pwd)

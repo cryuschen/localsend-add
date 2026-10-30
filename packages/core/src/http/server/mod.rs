@@ -1,3 +1,4 @@
+// Modified by localsend-add contributors, 2026. See NOTICE and LICENSE.
 pub mod common;
 mod connection_limit;
 pub mod internal;
@@ -192,8 +193,8 @@ impl ServerHandle {
     /// Cancels the active v2 upload session if it matches `session_id`,
     /// e.g. because the user aborted the transfer on the receiving side.
     ///
-    /// Uploads that are already in progress still run to completion, but new
-    /// upload requests fail and a new session can be created.
+    /// Active upload bodies are cancelled as well. New upload requests fail
+    /// and a new session can be created.
     /// No [ServerEventV2::SessionEnd] is emitted: the application initiated
     /// the cancellation itself.
     ///
@@ -205,6 +206,7 @@ impl ServerHandle {
         let mut slot = v2.session.lock().await;
         match slot.as_ref() {
             Some(SessionStateV2::Active(session)) if session.session_id == session_id => {
+                session.cancel.cancel();
                 *slot = None;
                 true
             }

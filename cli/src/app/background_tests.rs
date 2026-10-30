@@ -1,3 +1,4 @@
+// Modified by localsend-add contributors, 2026. See NOTICE and LICENSE.
 //! Local-only migration checks: no multicast interfaces or announcements.
 use super::*;
 use crate::storage::{Identity, PairedDevices};

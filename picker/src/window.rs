@@ -1,3 +1,4 @@
+// Modified by localsend-add contributors, 2026. See NOTICE and LICENSE.
 use crate::backend::{Device, Job, Reply};
 use futures_util::StreamExt;
 use gtk::prelude::*;

@@ -1,3 +1,4 @@
+// Modified by localsend-add contributors, 2026. See NOTICE and LICENSE.
 //! The headless `send --to` mode: discover the destination, send the files
 //! or the text message, exit with the transfer result. There is no keyboard and no overlay — only
 //! the network events a send needs are handled, and incoming transfer

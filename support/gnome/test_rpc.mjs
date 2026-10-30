@@ -1,3 +1,4 @@
+// Modified by localsend-add contributors, 2026. See NOTICE and LICENSE.
 import Gio from 'gi://Gio';
 import {rpc} from './localsend-transfer@local/rpc.mjs';
 const value = await rpc(ARGV[0], {command: 'panel'}, new Gio.Cancellable());

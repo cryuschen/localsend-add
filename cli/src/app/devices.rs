@@ -1,3 +1,4 @@
+// Modified by localsend-add contributors, 2026. See NOTICE and LICENSE.
 //! The device list overlay: paired and discovered devices, with the send
 //! and unpair actions.
 

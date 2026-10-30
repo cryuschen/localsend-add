@@ -1,10 +1,12 @@
+// Modified by localsend-add contributors, 2026. See NOTICE and LICENSE.
 use crate::crypto;
 use bytes::Bytes;
 use http_body_util::BodyExt;
 use hyper::body::Incoming;
 use hyper::Request;
 use std::future::Future;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 
 /// Channel capacity for file upload chunks (provides backpressure).
@@ -14,9 +16,20 @@ const UPLOAD_CHANNEL_CAPACITY: usize = 16;
 /// TLS record, ~16 KiB) into larger file writes.
 const WRITE_BUFFER_SIZE: usize = 512 * 1024;
 
+/// Maximum inactivity between upload body frames, also used for accepted sessions.
+pub(crate) const UPLOAD_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
+
 /// Where the content of an uploaded file should go, decided by the application.
 #[derive(Debug)]
 pub enum FileUploadTarget {
+    /// Writes to a private sibling temporary file and publishes it only after
+    /// size/checksum verification. An existing destination is never overwritten.
+    /// Added by localsend-add for the desktop CLI's receive directory.
+    AtomicPath {
+        path: PathBuf,
+        result_tx: oneshot::Sender<Result<(), String>>,
+        progress_tx: Option<mpsc::Sender<u64>>,
+    },
     /// The application consumes the binary chunks itself.
     ///
     /// The server forwards chunks into `binary_tx` and closes it at end of file.
@@ -102,6 +115,62 @@ pub(crate) enum SaveResult {
     HashMismatch,
 }
 
+/// Owns only the randomly named temporary file; cleanup also runs on cancellation.
+struct AtomicUpload {
+    temporary: PathBuf,
+    destination: PathBuf,
+}
+
+impl AtomicUpload {
+    fn create(destination: PathBuf) -> Result<(Self, tokio::fs::File), String> {
+        let parent = destination.parent().unwrap_or_else(|| Path::new("."));
+        let temporary = parent.join(format!(".localsend-{}.part", uuid::Uuid::new_v4()));
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        // Keep creation and ownership together: a cancelled async open must not
+        // create a temporary file after its cleanup guard has been dropped.
+        let file = options
+            .open(&temporary)
+            .map_err(|e| format!("Cannot create receive temporary file: {e}"))?;
+        Ok((
+            Self {
+                temporary,
+                destination,
+            },
+            tokio::fs::File::from_std(file),
+        ))
+    }
+
+    fn publish(&self) -> Result<(), String> {
+        // A same-directory hard link atomically publishes complete data and
+        // fails if another transfer/process already claimed the destination.
+        std::fs::hard_link(&self.temporary, &self.destination).map_err(|e| {
+            format!(
+                "Cannot publish {} without overwriting: {e}",
+                self.destination.display()
+            )
+        })
+    }
+}
+
+impl Drop for AtomicUpload {
+    fn drop(&mut self) {
+        if let Err(error) = std::fs::remove_file(&self.temporary) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(
+                    "Cannot remove receive temporary file {}: {error}",
+                    self.temporary.display()
+                );
+            }
+        }
+    }
+}
+
 /// Forwards the body of `req` to `target`.
 pub(crate) async fn save_req_to_target(
     req: Request<Incoming>,
@@ -116,7 +185,25 @@ pub(crate) async fn save_req_to_target(
     // For [FileUploadTarget::Path] and [FileUploadTarget::Fd], the application's
     // result channel is answered by this function once the complete outcome
     // (including the checksum verification) is known.
+    let mut atomic_upload = None;
     let (binary_tx, result_rx, app_result_tx) = match target {
+        FileUploadTarget::AtomicPath {
+            path,
+            result_tx,
+            progress_tx,
+        } => {
+            let (temporary, file) = match AtomicUpload::create(path) {
+                Ok(created) => created,
+                Err(error) => {
+                    let _ = result_tx.send(Err(error));
+                    return SaveResult::Failed;
+                }
+            };
+            atomic_upload = Some(temporary);
+            let (binary_tx, result_rx) =
+                spawn_file_writer(async move { Ok(file) }, file_size, progress_tx, timestamps);
+            (binary_tx, result_rx, Some(result_tx))
+        }
         FileUploadTarget::Stream {
             binary_tx,
             result_rx,
@@ -165,7 +252,16 @@ pub(crate) async fn save_req_to_target(
     let mut hasher = expected_sha256.map(|_| Sha256::new());
     let mut body = req.into_body();
     let mut stream_error = false;
-    while let Some(frame) = body.frame().await {
+    loop {
+        let frame = match tokio::time::timeout(UPLOAD_IDLE_TIMEOUT, body.frame()).await {
+            Ok(Some(frame)) => frame,
+            Ok(None) => break,
+            Err(_) => {
+                tracing::warn!("Upload body timed out while waiting for data");
+                stream_error = true;
+                break;
+            }
+        };
         match frame {
             Ok(frame) => {
                 let Ok(data) = frame.into_data() else {
@@ -196,7 +292,7 @@ pub(crate) async fn save_req_to_target(
     drop(binary_tx);
 
     // Determine the outcome; `error` carries the reason for the application.
-    let (result, error): (SaveResult, Option<String>) = 'outcome: {
+    let (mut result, mut error): (SaveResult, Option<String>) = 'outcome: {
         if stream_error {
             // The file writer (if any) fails with a size mismatch or its own
             // write error once the channel is closed; collect that reason.
@@ -235,6 +331,16 @@ pub(crate) async fn save_req_to_target(
 
         (SaveResult::Success, None)
     };
+
+    if result == SaveResult::Success {
+        if let Some(temporary) = &atomic_upload {
+            if let Err(reason) = temporary.publish() {
+                result = SaveResult::Failed;
+                error = Some(reason);
+            }
+        }
+    }
+    drop(atomic_upload);
 
     if let Some(app_result_tx) = app_result_tx {
         let _ = app_result_tx.send(match error {

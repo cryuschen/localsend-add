@@ -1,3 +1,4 @@
+// Modified by localsend-add contributors, 2026. See NOTICE and LICENSE.
 //! Same-user, local control of one on-demand background process.
 
 use crate::{Args, Command, WebCommand, app, storage};

@@ -1,3 +1,4 @@
+// Modified by localsend-add contributors, 2026. See NOTICE and LICENSE.
 use crate::http::server::PeerIp;
 use crate::model::transfer::FileDto;
 use std::collections::HashMap;
@@ -35,6 +36,10 @@ pub(crate) struct UploadSessionV2 {
 
     /// The accepted files, mapped by file ID.
     pub(crate) files: HashMap<String, SessionFileV2>,
+
+    /// localsend-add: abort active bodies when the session is cancelled.
+    pub(crate) cancel: CancellationToken,
+    pub(crate) last_activity: tokio::time::Instant,
 }
 
 impl UploadSessionV2 {

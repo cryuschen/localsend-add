@@ -1,3 +1,4 @@
+// Modified by localsend-add contributors, 2026. See NOTICE and LICENSE.
 use crossterm::terminal::{Clear, ClearType};
 use crossterm::{cursor, execute};
 use localsend::util::filename;
@@ -93,10 +94,15 @@ pub fn progress_bar(fraction: f64, width: usize) -> String {
 /// final path component and sanitized for the local filesystem, so it can
 /// neither escape the target directory nor carry illegal characters.
 pub fn unique_path(dir: &Path, file_name: &str) -> PathBuf {
+    unique_path_reserved(dir, file_name, &[])
+}
+
+/// Also excludes names reserved by concurrent uploads in the current session.
+pub fn unique_path_reserved(dir: &Path, file_name: &str, reserved: &[PathBuf]) -> PathBuf {
     let name = filename::sanitize_path(file_name, filename::Rules::current());
 
     let candidate = dir.join(&name);
-    if !candidate.exists() {
+    if !candidate.exists() && !reserved.contains(&candidate) {
         return candidate;
     }
 
@@ -106,7 +112,7 @@ pub fn unique_path(dir: &Path, file_name: &str) -> PathBuf {
     };
     (1..)
         .map(|i| dir.join(format!("{stem} ({i}){extension}")))
-        .find(|candidate| !candidate.exists())
+        .find(|candidate| !candidate.exists() && !reserved.contains(candidate))
         .unwrap()
 }
 

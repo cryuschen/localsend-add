@@ -1,3 +1,4 @@
+// Modified by localsend-add contributors, 2026. See NOTICE and LICENSE.
 //! "Share via link" (W+S) and "Receive via link" (W+R): serving the web
 //! pages so browsers can download from or upload to this device.
 //!

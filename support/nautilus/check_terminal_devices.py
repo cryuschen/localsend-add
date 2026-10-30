@@ -1,3 +1,4 @@
+# Modified by localsend-add contributors, 2026. See NOTICE and LICENSE.
 """Verify the explicit terminal device command returns completed probe results.
 
 Usage: python3 support/nautilus/check_terminal_devices.py target/release/localsend-cli

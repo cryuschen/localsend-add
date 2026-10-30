@@ -1,3 +1,4 @@
+// Modified by localsend-add contributors, 2026. See NOTICE and LICENSE.
 import {view, selectTransfer} from './localsend-transfer@local/model.mjs';
 let cases = 0;
 function assert(ok, message) { if (!ok) throw new Error(message); cases++; }

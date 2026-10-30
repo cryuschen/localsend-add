@@ -1,18 +1,12 @@
-blank_issues_enabled: false
+# Modified by localsend-add contributors, 2026. See NOTICE and LICENSE.
+blank_issues_enabled: true
 contact_links:
-  - name: Security issues
-    url: https://github.com/localsend/localsend/blob/main/CONTRIBUTING.md#security-issues
-    about: Help us address security issues as quickly and effectively as possible
-
-  - name: Get latest LocalSend
-    url: https://localsend.org/download
-    about: Your issue may be version related, so try updating first
-
-  - name: GitHub Discussions
-    url: https://github.com/localsend/localsend/discussions
-    about: If you think your issue isn't that serious, you can discuss it here
-
-  - name: Contributing guide
-    url: https://github.com/localsend/localsend/blob/main/CONTRIBUTING.md
-    about: Check our contributing guide if you’re interested or have time
-    
+  - name: Desktop installation and recovery
+    url: https://github.com/cryuschen/localsend-add/blob/main/support/desktop/QUICKSTART.md
+    about: Supported environments, dependencies, installation and recovery
+  - name: Security reporting
+    url: https://github.com/cryuschen/localsend-add/blob/main/SECURITY.md
+    about: Do not include private identities, credentials or personal files in public issues
+  - name: Official LocalSend
+    url: https://github.com/localsend/localsend
+    about: Upstream app, protocol and supported official downloads

@@ -1,3 +1,4 @@
+# Modified by localsend-add contributors, 2026. See NOTICE and LICENSE.
 """LocalSend device submenu for GNOME Files (Nautilus 43+).
 
 Networking and file transfer run in the CLI, never in Nautilus' UI thread.

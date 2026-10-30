@@ -1,4 +1,5 @@
 #!/bin/bash
+# Modified by localsend-add contributors, 2026. See NOTICE and LICENSE.
 set -eu
 picker_source=$(cd -- "$(dirname -- "$0")/../.." && pwd)
 picker_temporary=$(mktemp -d /tmp/localsend-picker-shell-XXXXXX)

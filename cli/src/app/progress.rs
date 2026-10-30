@@ -1,3 +1,4 @@
+// Modified by localsend-add contributors, 2026. See NOTICE and LICENSE.
 //! Local panel snapshots. Reading these never starts discovery or networking.
 use serde::Serialize;
 use serde_json::{Value, json};

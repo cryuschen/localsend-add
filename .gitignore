@@ -1,3 +1,4 @@
+# Modified by localsend-add contributors, 2026. See NOTICE and LICENSE.
 .idea
 
 # Pub workspace resolution output
@@ -66,6 +67,7 @@ identity.pem*
 *.keystore
 paired-v*.json*
 /config.toml
+/cli/config.toml
 /.config/localsend-cli/
 /.local/state/localsend-cli/
 control.sock
@@ -73,3 +75,6 @@ control.sock
 .aws/
 .codex/
 .agents/
+
+# Desktop release bundles
+/release/

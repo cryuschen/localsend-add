@@ -1,3 +1,4 @@
+// Modified by localsend-add contributors, 2026. See NOTICE and LICENSE.
 //! The receiving side: incoming transfer requests, the Y/N/P decision and the
 //! active receive session.
 
@@ -395,7 +396,14 @@ impl App {
             return;
         };
 
-        let path = util::unique_path(&self.storage.destination, &file.file_name);
+        let reserved: Vec<_> = session
+            .targets
+            .iter()
+            .filter(|(id, _)| *id != &file_id)
+            .map(|(_, path)| path.clone())
+            .collect();
+        let path =
+            util::unique_path_reserved(&self.storage.destination, &file.file_name, &reserved);
         session.remember_target(&file_id, path.clone());
 
         let progress = session.start_file_progress(&file_id);
@@ -428,7 +436,7 @@ impl App {
             }
         });
 
-        let _ = target_tx.send(FileUploadTarget::Path {
+        let _ = target_tx.send(FileUploadTarget::AtomicPath {
             path,
             result_tx,
             progress_tx: Some(progress_tx),

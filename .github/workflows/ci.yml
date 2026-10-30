@@ -1,3 +1,4 @@
+# Modified by localsend-add contributors, 2026. See NOTICE and LICENSE.
 name: CI
 
 on:
@@ -9,7 +10,35 @@ on:
 env:
   FLUTTER_VERSION: "3.41.9"
 
+permissions:
+  contents: read
+
 jobs:
+  desktop:
+    name: Desktop CLI, GTK and installer
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install desktop test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libssl-dev libgtk-4-dev libgtk-4-bin gjs python3-gi python3-nautilus gir1.2-nautilus-4.1 gir1.2-gtk-4.0 dbus-x11
+      - name: Setup pinned Rust
+        run: rustup toolchain install --profile minimal
+      - uses: Swatinem/rust-cache@v2
+      - name: CLI and picker tests
+        run: cargo test --locked -p localsend-cli -p localsend-picker --jobs 2
+      - name: Installer lifecycle tests
+        run: python3 -m unittest discover -s support/desktop -p 'test_*.py'
+      - name: Isolated GTK and Nautilus tests
+        run: bash support/gnome/test_picker.sh
+      - name: GNOME state model tests
+        run: |
+          gjs -m support/gnome/test_ring.mjs
+          gjs -m support/gnome/test_model.mjs
+      - name: Publication checks
+        run: python3 support/desktop/check_publication.py
+
   format:
     runs-on: ubuntu-latest
 
@@ -182,4 +211,3 @@ jobs:
           else
             echo "Toolchain versions match."
           fi
-

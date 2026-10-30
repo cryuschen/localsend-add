@@ -1,3 +1,4 @@
+# Modified by localsend-add contributors, 2026. See NOTICE and LICENSE.
 """Exercise picker-only installation and rollback in a temporary fake home."""
 import json
 from pathlib import Path

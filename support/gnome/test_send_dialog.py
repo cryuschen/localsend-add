@@ -1,3 +1,4 @@
+# Modified by localsend-add contributors, 2026. See NOTICE and LICENSE.
 """Only the legacy launch bridge remains in Python; GTK tests live in picker/."""
 import importlib.util
 from pathlib import Path

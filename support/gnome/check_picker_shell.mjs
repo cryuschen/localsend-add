@@ -1,3 +1,4 @@
+// Modified by localsend-add contributors, 2026. See NOTICE and LICENSE.
 // Run only in an isolated headless GNOME session (see test_picker_shell.sh).
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';

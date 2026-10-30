@@ -1,3 +1,4 @@
+// Modified by localsend-add contributors, 2026. See NOTICE and LICENSE.
 import {selectTransfer} from './model.mjs';
 
 export const COLORS = {white: [0.953, 0.953, 0.961], green: [0.392, 0.851, 0.545],

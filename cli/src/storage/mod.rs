@@ -1,3 +1,4 @@
+// Modified by localsend-add contributors, 2026. See NOTICE and LICENSE.
 //! The CLI's persistence layer. All persistent files live in one directory
 //! (see [`Repository::dir`]) and are loaded through the unified
 //! [`Repository`]:

@@ -1,3 +1,4 @@
+// Modified by localsend-add contributors, 2026. See NOTICE and LICENSE.
 #[cfg(target_os = "linux")]
 mod backend;
 #[cfg(target_os = "linux")]

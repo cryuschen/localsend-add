@@ -1,3 +1,4 @@
+// Modified by localsend-add contributors, 2026. See NOTICE and LICENSE.
 use crate::http::dto_v2::{
     InfoResponseDtoV2, PrepareUploadRequestDtoV2, PrepareUploadResponseDtoV2, RegisterDtoV2,
     RegisterResponseDtoV2,
@@ -7,6 +8,7 @@ use crate::http::server::common::error::AppError;
 use crate::http::server::common::pin::check_pin;
 use crate::http::server::common::query::parse_query;
 use crate::http::server::common::response::{empty_body, BoxedBody, JsonResponse};
+use crate::http::server::common::save::UPLOAD_IDLE_TIMEOUT;
 use crate::http::server::common::save::{FileTimestamps, FileUploadTarget, SaveResult};
 use crate::http::server::common::session::{
     FileStatusV2, PendingSessionV2, SessionFileV2, SessionStateV2, UploadSessionV2,
@@ -343,9 +345,14 @@ pub(crate) async fn prepare_upload(
             session_id: session_id.clone(),
             sender_ip: client_info.ip,
             files,
+            cancel: cancelled,
+            last_activity: tokio::time::Instant::now(),
         }));
     }
     pending_guard.disarm();
+    // localsend-add: a peer which accepts a session and disappears must not
+    // hold the only receive slot indefinitely (including checksum retries).
+    watch_idle_session(Arc::downgrade(&v2), session_id.clone());
 
     tracing::info!("Upload session created: {session_id}");
 
@@ -379,7 +386,7 @@ pub(crate) async fn upload(
     };
 
     // Validate the request and mark the file as in progress.
-    let file_dto = {
+    let (file_dto, cancelled) = {
         let mut slot = v2.session.lock().await;
         let Some(SessionStateV2::Active(session)) = slot.as_mut() else {
             return Err(invalid_token_error());
@@ -395,7 +402,9 @@ pub(crate) async fn upload(
         }
         file.status = FileStatusV2::InProgress;
         file.attempts = file.attempts.saturating_add(1);
-        file.dto.clone()
+        let dto = file.dto.clone();
+        session.last_activity = tokio::time::Instant::now();
+        (dto, session.cancel.clone())
     };
 
     // Marks the file as failed if this request is aborted mid-transfer.
@@ -426,19 +435,26 @@ pub(crate) async fn upload(
         return Err(AppError::Status(StatusCode::INTERNAL_SERVER_ERROR));
     }
 
-    let Ok(target) = target_rx.await else {
+    let target = tokio::select! {
+        target = target_rx => target,
+        _ = cancelled.cancelled() => return Err(invalid_token_error()),
+    };
+    let Ok(target) = target else {
         upload_guard.finish(SaveResult::Failed).await;
         return Err(AppError::Status(StatusCode::INTERNAL_SERVER_ERROR));
     };
 
-    let result = common::save::save_req_to_target(
+    let save = common::save::save_req_to_target(
         req,
         target,
         file_size,
         expected_sha256.as_deref(),
         timestamps,
-    )
-    .await;
+    );
+    let result = tokio::select! {
+        result = save => result,
+        _ = cancelled.cancelled() => SaveResult::Failed,
+    };
 
     upload_guard.finish(result).await;
 
@@ -495,6 +511,7 @@ pub(crate) async fn cancel(
                 Some(SessionStateV2::Active(session))
                     if session.session_id == *session_id && session.sender_ip == client_info.ip =>
                 {
+                    session.cancel.cancel();
                     *slot = None;
                     true
                 }
@@ -659,6 +676,7 @@ async fn finalize_file(v2: &V2State, session_id: &str, file_id: &str, result: Sa
         if session.session_id != session_id {
             return;
         }
+        session.last_activity = tokio::time::Instant::now();
         if let Some(file) = session.files.get_mut(file_id) {
             if file.status == FileStatusV2::InProgress {
                 file.status = match result {
@@ -688,5 +706,156 @@ async fn finalize_file(v2: &V2State, session_id: &str, file_id: &str, result: Sa
                 reason: SessionEndReasonV2::Finished,
             })
             .await;
+    }
+}
+
+fn watch_idle_session(v2: std::sync::Weak<V2State>, session_id: String) {
+    tokio::spawn(async move {
+        loop {
+            let Some(state) = v2.upgrade() else { return };
+            let deadline = {
+                let slot = state.session.lock().await;
+                let Some(SessionStateV2::Active(session)) = slot.as_ref() else {
+                    return;
+                };
+                if session.session_id != session_id {
+                    return;
+                }
+                if session
+                    .files
+                    .values()
+                    .any(|file| file.status == FileStatusV2::InProgress)
+                {
+                    // Active bodies have their own inactivity timeout. Do not
+                    // interrupt a long transfer which is still making progress.
+                    tokio::time::Instant::now() + UPLOAD_IDLE_TIMEOUT
+                } else {
+                    session.last_activity + UPLOAD_IDLE_TIMEOUT
+                }
+            };
+            drop(state);
+            tokio::time::sleep_until(deadline).await;
+            let Some(state) = v2.upgrade() else { return };
+            if expire_idle_session(&state, &session_id, tokio::time::Instant::now()).await {
+                return;
+            }
+        }
+    });
+}
+
+async fn expire_idle_session(v2: &V2State, session_id: &str, now: tokio::time::Instant) -> bool {
+    let expired = {
+        let mut slot = v2.session.lock().await;
+        match slot.as_ref() {
+            Some(SessionStateV2::Active(session))
+                if session.session_id == session_id
+                    && now.saturating_duration_since(session.last_activity)
+                        >= UPLOAD_IDLE_TIMEOUT
+                    && session
+                        .files
+                        .values()
+                        .all(|file| file.status != FileStatusV2::InProgress) =>
+            {
+                session.cancel.cancel();
+                *slot = None;
+                true
+            }
+            _ => false,
+        }
+    };
+    if expired {
+        tracing::warn!("Discarding idle upload session: {session_id}");
+        let _ = v2
+            .event_tx
+            .send(ServerEventV2::SessionEnd {
+                session_id: session_id.to_string(),
+                reason: SessionEndReasonV2::Cancelled,
+            })
+            .await;
+    }
+    expired
+}
+
+#[cfg(test)]
+mod idle_session_tests {
+    use super::*;
+    use lru::LruCache;
+    use std::num::NonZeroUsize;
+    use tokio::sync::{mpsc, Mutex};
+
+    #[tokio::test]
+    async fn idle_watchdog_releases_only_its_own_abandoned_session() {
+        let (event_tx, mut event_rx) = mpsc::channel(8);
+        let cancelled = CancellationToken::new();
+        let state = Arc::new(V2State {
+            pin: None,
+            verify_checksums: true,
+            event_tx,
+            session: Mutex::new(Some(SessionStateV2::Active(UploadSessionV2 {
+                session_id: "abandoned".into(),
+                sender_ip: PeerIp {
+                    ip: "127.0.0.1".parse().unwrap(),
+                    scope_id: None,
+                },
+                files: HashMap::new(),
+                cancel: cancelled.clone(),
+                last_activity: tokio::time::Instant::now() - UPLOAD_IDLE_TIMEOUT,
+            }))),
+            pin_attempts: Mutex::new(LruCache::new(NonZeroUsize::new(8).unwrap())),
+        });
+        assert!(!expire_idle_session(&state, "older-session", tokio::time::Instant::now()).await);
+        assert!(!cancelled.is_cancelled());
+        // Fresh activity must extend the deadline, and a live upload must not
+        // be expired just because its total transfer duration is long.
+        {
+            let mut slot = state.session.lock().await;
+            let Some(SessionStateV2::Active(session)) = slot.as_mut() else {
+                unreachable!()
+            };
+            session.last_activity = tokio::time::Instant::now();
+        }
+        assert!(!expire_idle_session(&state, "abandoned", tokio::time::Instant::now()).await);
+        {
+            let mut slot = state.session.lock().await;
+            let Some(SessionStateV2::Active(session)) = slot.as_mut() else {
+                unreachable!()
+            };
+            session.last_activity -= UPLOAD_IDLE_TIMEOUT;
+            session.files.insert(
+                "live".into(),
+                SessionFileV2 {
+                    dto: FileDto {
+                        id: "live".into(),
+                        file_name: "live.bin".into(),
+                        size: 10,
+                        file_type: "application/octet-stream".into(),
+                        sha256: None,
+                        preview: None,
+                        metadata: None,
+                    },
+                    token: "test-token".into(),
+                    status: FileStatusV2::InProgress,
+                    attempts: 1,
+                },
+            );
+        }
+        assert!(!expire_idle_session(&state, "abandoned", tokio::time::Instant::now()).await);
+        {
+            let mut slot = state.session.lock().await;
+            let Some(SessionStateV2::Active(session)) = slot.as_mut() else {
+                unreachable!()
+            };
+            session.files.get_mut("live").unwrap().status = FileStatusV2::Pending;
+        }
+        watch_idle_session(Arc::downgrade(&state), "abandoned".into());
+        let event = tokio::time::timeout(std::time::Duration::from_secs(1), event_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(event, ServerEventV2::SessionEnd { session_id, reason: SessionEndReasonV2::Cancelled } if session_id == "abandoned")
+        );
+        assert!(cancelled.is_cancelled());
+        assert!(state.session.lock().await.is_none());
     }
 }

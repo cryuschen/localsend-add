@@ -1,3 +1,4 @@
+// Modified by localsend-add contributors, 2026. See NOTICE and LICENSE.
 use anyhow::Context;
 use localsend::discovery::{HttpChannel, StatefulDevice};
 use localsend::model::discovery::ProtocolType;

@@ -1,3 +1,4 @@
+# Modified by localsend-add contributors, 2026. See NOTICE and LICENSE.
 """Exercise isolated local peers, including real HTTPS directory transfer.
 
 No personal configuration or files are used. Notifications are suppressed.

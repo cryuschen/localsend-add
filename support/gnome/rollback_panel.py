@@ -1,3 +1,4 @@
+# Modified by localsend-add contributors, 2026. See NOTICE and LICENSE.
 """Restore only panel-install.json's owned files; preserve current user settings."""
 import ast
 import hashlib

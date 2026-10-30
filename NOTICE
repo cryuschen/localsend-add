@@ -1,0 +1,19 @@
+LocalSend Add (GNOME desktop edition)
+
+This is an unofficial derivative of LocalSend:
+https://github.com/localsend/localsend
+Original LocalSend copyright and attribution notices remain in LICENSE and
+upstream source files. LocalSend copyright 2022-2026 Tien Do Nam.
+
+Desktop modifications copyright 2026 localsend-add contributors, distributed
+under the Apache License, Version 2.0.
+
+Changes include a unified Rust CLI background service, same-user control socket,
+GNOME Shell status ring, Rust GTK4 file/device/text selector, Nautilus menu,
+transactional verified CLI receive files, receive session cleanup, user-local
+installer and desktop release/test tooling. See CHANGELOG.desktop.md and Git
+history for details. These modifications are not an official LocalSend release.
+
+The license does not grant trademark rights. LocalSend is used here to describe
+origin and protocol compatibility. Third-party notices and licenses bundled
+with upstream and dependencies retain their original terms.
